@@ -693,8 +693,13 @@ export default function App() {
       creado = { ok: false, error: mensajeErrorAuth(e.code) };
     }
     if (!creado.ok) return creado;
-    const guardadoLista = await fsSet("admins", usuario.trim(), { usuario: usuario.trim() });
-    if (!guardadoLista) return { ok: false, error: "Se creó la cuenta pero no se pudo guardar en la lista de administradores. Revisa tu conexión." };
+    let guardadoLista;
+    try {
+      guardadoLista = await conTimeout(fsSet("admins", usuario.trim(), { usuario: usuario.trim() }));
+    } catch (e) {
+      guardadoLista = false;
+    }
+    if (!guardadoLista) return { ok: false, error: "Se creó la cuenta pero no se pudo guardar en la lista de administradores. Revisa tu conexión e intenta de nuevo — no hace falta crear otra cuenta." };
     setSesion({ tipo: "admin", usuario: usuario.trim() });
     return { ok: true };
   };
