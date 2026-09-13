@@ -690,16 +690,24 @@ export default function App() {
       await conTimeout(createUserWithEmailAndPassword(auth, usuarioAEmail(usuario), password));
       creado = { ok: true };
     } catch (e) {
-      creado = { ok: false, error: mensajeErrorAuth(e.code) };
+      if (e.code === "auth/email-already-in-use") {
+        // Ya se había creado en un intento anterior que se quedó a medias — iniciamos sesión en vez de volver a crear.
+        creado = await conTimeout(iniciarSesionAdminAuth(usuario, password)).catch(() => ({ ok: false, error: mensajeErrorAuth("timeout") }));
+      } else {
+        creado = { ok: false, error: mensajeErrorAuth(e.code) };
+      }
     }
     if (!creado.ok) return creado;
-    let guardadoLista;
+    let guardadoLista = false;
+    let detalleError = "";
     try {
-      guardadoLista = await conTimeout(fsSet("admins", usuario.trim(), { usuario: usuario.trim() }));
+      await conTimeout(setDoc(doc(db, "admins", usuario.trim()), { usuario: usuario.trim() }), 25000);
+      guardadoLista = true;
     } catch (e) {
-      guardadoLista = false;
+      detalleError = e?.code || e?.message || "error desconocido";
+      console.error("firestore set error (primer admin)", e);
     }
-    if (!guardadoLista) return { ok: false, error: "Se creó la cuenta pero no se pudo guardar en la lista de administradores. Revisa tu conexión e intenta de nuevo — no hace falta crear otra cuenta." };
+    if (!guardadoLista) return { ok: false, error: `Se creó la cuenta pero no se pudo guardar en la lista de administradores. Detalle técnico: ${detalleError}` };
     setSesion({ tipo: "admin", usuario: usuario.trim() });
     return { ok: true };
   };
