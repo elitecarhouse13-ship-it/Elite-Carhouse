@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import * as XLSX from "xlsx";
 import { initializeApp, deleteApp } from "firebase/app";
-import { initializeFirestore, collection, doc, setDoc, deleteDoc, onSnapshot } from "firebase/firestore";
+import { initializeFirestore, memoryLocalCache, collection, doc, setDoc, deleteDoc, onSnapshot } from "firebase/firestore";
 import {
   getAuth,
   initializeAuth,
@@ -237,8 +237,14 @@ const firebaseApp = initializeApp(firebaseConfig);
 // Algunas redes (ciertos operadores móviles, wifis con filtros) bloquean el tipo de
 // conexión que Firestore usa por defecto (streaming), dejando pasar todo lo demás
 // sin problema. Se fuerza "long polling" siempre, sin depender de que la detección
-// automática funcione bien en esa red.
-const db = initializeFirestore(firebaseApp, { experimentalForceLongPolling: true, useFetchStreams: false });
+// automática funcione bien en esa red. También se evita la caché local en IndexedDB
+// (algunos navegadores/celulares la tienen bloqueada o con problemas, y eso puede
+// colgar TODAS las operaciones de Firestore sin dar ningún error).
+const db = initializeFirestore(firebaseApp, {
+  experimentalForceLongPolling: true,
+  useFetchStreams: false,
+  localCache: memoryLocalCache(),
+});
 const auth = getAuth(firebaseApp);
 
 // Firebase Authentication pide un correo, pero en la app los admins usan un
