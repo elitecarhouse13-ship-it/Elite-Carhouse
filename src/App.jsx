@@ -1,19 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import * as XLSX from "xlsx";
-import { initializeApp, deleteApp } from "firebase/app";
+import { initializeApp } from "firebase/app";
 import { initializeFirestore, memoryLocalCache, collection, doc, setDoc, deleteDoc, onSnapshot } from "firebase/firestore";
-import {
-  getAuth,
-  initializeAuth,
-  inMemoryPersistence,
-  signInWithEmailAndPassword,
-  signOut,
-  onAuthStateChanged,
-  createUserWithEmailAndPassword,
-  updatePassword,
-  reauthenticateWithCredential,
-  EmailAuthProvider,
-} from "firebase/auth";
 import {
   Plus, Search, Car, Home, Package, X, Check, Bell, User,
   Facebook, Instagram, MessageCircle, Store, Trash2, Pencil,
@@ -245,72 +233,6 @@ const db = initializeFirestore(firebaseApp, {
   useFetchStreams: false,
   localCache: memoryLocalCache(),
 });
-const auth = getAuth(firebaseApp);
-
-// Firebase Authentication pide un correo, pero en la app los admins usan un
-// "usuario" simple — lo convertimos a un correo interno que nunca se muestra.
-const ADMIN_EMAIL_DOMAIN = "elitecarhouse.local";
-function usuarioAEmail(usuario) {
-  return `${usuario.trim().toLowerCase()}@${ADMIN_EMAIL_DOMAIN}`;
-}
-// Evita que un botón se quede "cargando" para siempre si algo se traba
-// (mala señal, un problema de Firebase, etc.) — a los 15s muestra un error.
-function conTimeout(promesa, ms = 15000) {
-  return Promise.race([
-    promesa,
-    new Promise((_, reject) => setTimeout(() => reject({ code: "timeout" }), ms)),
-  ]);
-}
-function mensajeErrorAuth(codigo) {
-  const mapa = {
-    "timeout": "Esto está tardando demasiado. Revisa tu conexión e intenta de nuevo.",
-    "auth/invalid-credential": "Usuario o contraseña incorrectos.",
-    "auth/invalid-email": "Usuario o contraseña incorrectos.",
-    "auth/wrong-password": "Contraseña incorrecta.",
-    "auth/user-not-found": "Ese usuario no existe. Pídele a un administrador que te cree una cuenta.",
-    "auth/too-many-requests": "Demasiados intentos. Espera un momento e intenta de nuevo.",
-    "auth/email-already-in-use": "Ese usuario ya existe.",
-    "auth/weak-password": "La contraseña debe tener al menos 6 caracteres.",
-    "auth/network-request-failed": "Sin conexión. Revisa tu internet e intenta de nuevo.",
-  };
-  return mapa[codigo] || "Ocurrió un error. Intenta de nuevo.";
-}
-// Crea la cuenta en Firebase Auth usando una app secundaria, para no cerrar
-// la sesión del admin que está creando la cuenta nueva. Usa persistencia en
-// memoria (no IndexedDB) para evitar que choque con la sesión principal en
-// algunos navegadores — solo la necesitamos un instante, no hace falta guardarla.
-async function crearAdminAuth(usuario, password) {
-  const appSecundaria = initializeApp(firebaseConfig, `crear-admin-${Date.now()}`);
-  const authSecundaria = initializeAuth(appSecundaria, { persistence: inMemoryPersistence });
-  try {
-    await conTimeout(createUserWithEmailAndPassword(authSecundaria, usuarioAEmail(usuario), password));
-    return { ok: true };
-  } catch (e) {
-    return { ok: false, error: mensajeErrorAuth(e.code) };
-  } finally {
-    deleteApp(appSecundaria).catch(() => {});
-  }
-}
-async function iniciarSesionAdminAuth(usuario, password) {
-  try {
-    await conTimeout(signInWithEmailAndPassword(auth, usuarioAEmail(usuario), password));
-    return { ok: true };
-  } catch (e) {
-    return { ok: false, error: mensajeErrorAuth(e.code) };
-  }
-}
-async function cambiarPasswordPropiaAuth(passwordActual, passwordNueva) {
-  try {
-    const cred = EmailAuthProvider.credential(auth.currentUser.email, passwordActual);
-    await reauthenticateWithCredential(auth.currentUser, cred);
-    await updatePassword(auth.currentUser, passwordNueva);
-    return { ok: true };
-  } catch (e) {
-    if (e.code === "auth/wrong-password" || e.code === "auth/invalid-credential") return { ok: false, error: "La contraseña actual no coincide." };
-    return { ok: false, error: mensajeErrorAuth(e.code) };
-  }
-}
-
 // Pide permiso de notificaciones al navegador. Estas son "notificaciones locales":
 // avisan mientras la app está abierta (aunque esté minimizada o en otra pestaña),
 // pero no llegan si el navegador está completamente cerrado — para eso se necesitaría
@@ -693,84 +615,16 @@ export default function App() {
     if (!ok) avisarError("No se pudo actualizar la papelera. Revisa tu conexión e intenta de nuevo.");
     return ok;
   };
-  const crearAdminFS = async (usuario, password) => {
-    const creado = await crearAdminAuth(usuario, password);
-    if (!creado.ok) return creado;
-    const guardadoLista = await fsSet("admins", usuario.trim(), { usuario: usuario.trim() });
-    if (!guardadoLista) return { ok: false, error: "Se creó la cuenta pero no se pudo guardar en la lista de administradores. Revisa tu conexión." };
-    return { ok: true };
-  };
-  const crearPrimerAdminYEntrar = async (usuario, password) => {
-    let creado;
-    try {
-      await conTimeout(createUserWithEmailAndPassword(auth, usuarioAEmail(usuario), password));
-      creado = { ok: true };
-    } catch (e) {
-      if (e.code === "auth/email-already-in-use") {
-        // Ya se había creado en un intento anterior que se quedó a medias — iniciamos sesión en vez de volver a crear.
-        creado = await conTimeout(iniciarSesionAdminAuth(usuario, password)).catch(() => ({ ok: false, error: mensajeErrorAuth("timeout") }));
-      } else {
-        creado = { ok: false, error: mensajeErrorAuth(e.code) };
-      }
-    }
-    if (!creado.ok) return creado;
-    let guardadoLista = false;
-    let detalleError = "";
-    try {
-      await conTimeout(setDoc(doc(db, "admins", usuario.trim()), { usuario: usuario.trim() }), 25000);
-      guardadoLista = true;
-    } catch (e) {
-      detalleError = e?.code || e?.message || "error desconocido";
-      console.error("firestore set error (primer admin)", e);
-    }
-    if (!guardadoLista) return { ok: false, error: `Se creó la cuenta pero no se pudo guardar en la lista de administradores. Detalle técnico: ${detalleError}` };
-    setSesion({ tipo: "admin", usuario: usuario.trim() });
-    return { ok: true };
-  };
-  const iniciarSesionAdminFS = async (usuario, password) => {
-    const entrado = await iniciarSesionAdminAuth(usuario, password);
-    if (!entrado.ok) return entrado;
-    const u = usuario.trim().toLowerCase();
-    const existe = admins.some((a) => a.usuario.toLowerCase() === u);
-    if (!existe) {
-      await signOut(auth);
-      return { ok: false, error: "Esta cuenta fue desactivada por un administrador." };
-    }
-    setSesion({ tipo: "admin", usuario: usuario.trim() });
-    return { ok: true };
-  };
-  const cambiarPasswordPropiaFS = async (passwordActual, passwordNueva) => {
-    return cambiarPasswordPropiaAuth(passwordActual, passwordNueva);
+  const guardarAdminFS = async (admin) => {
+    const ok = await fsSet("admins", admin.usuario, admin);
+    if (!ok) avisarError("No se pudo guardar los administradores. Revisa tu conexión e intenta de nuevo.");
+    return ok;
   };
   const eliminarAdminFS = async (usuario) => {
     const ok = await fsDelete("admins", usuario);
     if (!ok) avisarError("No se pudo guardar los administradores. Revisa tu conexión e intenta de nuevo.");
     return ok;
   };
-
-  // Si el navegador ya tenía una sesión de Firebase Auth activa (recargaste la página),
-  // la retoma sola — siempre que ese usuario siga en la lista de administradores.
-  useEffect(() => {
-    if (!loaded || sesion) return;
-    const unsub = onAuthStateChanged(auth, (user) => {
-      if (!user) return;
-      const usuario = user.email.replace(`@${ADMIN_EMAIL_DOMAIN}`, "");
-      const existe = admins.some((a) => a.usuario.toLowerCase() === usuario.toLowerCase());
-      if (existe) setSesion({ tipo: "admin", usuario });
-      else signOut(auth);
-    });
-    return () => unsub();
-  }, [loaded, admins, sesion]);
-
-  // Si a un admin lo quitan de la lista mientras tiene la app abierta, se le cierra la sesión al instante.
-  useEffect(() => {
-    if (!loaded || sesion?.tipo !== "admin") return;
-    const sigueSiendoAdmin = admins.some((a) => a.usuario.toLowerCase() === sesion.usuario.toLowerCase());
-    if (!sigueSiendoAdmin) {
-      signOut(auth);
-      setSesion(null);
-    }
-  }, [admins, loaded]);
   const guardarComisionistaFS = async (nombre) => {
     const ok = await fsSet("comisionistas", nombre, { nombre });
     if (!ok) avisarError("No se pudo guardar el comisionista. Revisa tu conexión e intenta de nuevo.");
@@ -833,8 +687,7 @@ export default function App() {
     return (
       <Login
         admins={admins}
-        onCrearPrimerAdmin={crearPrimerAdminYEntrar}
-        onIniciarSesion={iniciarSesionAdminFS}
+        onGuardarAdmin={guardarAdminFS}
         onEntrar={setSesion}
         error={errorGuardado}
       />
@@ -859,7 +712,7 @@ export default function App() {
       <style>{fontImports}</style>
       <TopBar
         sesion={sesion}
-        onCambiar={() => { if (sesion?.tipo === "admin") signOut(auth); setSesion(null); }}
+        onCambiar={() => setSesion(null)}
         onHistorial={() => {
           setVista(vista === "historial" ? "inventario" : "historial");
           const ahora = Date.now();
@@ -914,19 +767,18 @@ export default function App() {
       ) : vista === "solicitudes" ? (
         <Solicitudes solicitudes={solicitudes} onGuardarSolicitud={guardarSolicitudFS} onEliminarSolicitud={eliminarSolicitudFS} onGuardarPapeleraEntry={guardarPapeleraEntryFS} productos={productos} esAdmin={esAdmin} sesion={sesion} onVolver={() => setVista("inventario")} />
       ) : (
-        <Inventario productos={productos} solicitudes={solicitudes} onGuardarProducto={guardarProductoFS} esAdmin={esAdmin} sesion={sesion} admins={admins} onCrearAdmin={crearAdminFS} onEliminarAdmin={eliminarAdminFS} onCambiarPasswordPropia={cambiarPasswordPropiaFS} comisionistas={comisionistas} onGuardarComisionista={guardarComisionistaFS} onEliminarComisionista={eliminarComisionistaFS} onCambiarEstado={cambiarEstado} onEliminar={eliminar} papelera={papelera} onRestaurar={restaurarDePapelera} onEliminarDefinitivo={eliminarDefinitivo} />
+        <Inventario productos={productos} solicitudes={solicitudes} onGuardarProducto={guardarProductoFS} esAdmin={esAdmin} sesion={sesion} admins={admins} onGuardarAdmin={guardarAdminFS} onEliminarAdmin={eliminarAdminFS} comisionistas={comisionistas} onGuardarComisionista={guardarComisionistaFS} onEliminarComisionista={eliminarComisionistaFS} onCambiarEstado={cambiarEstado} onEliminar={eliminar} papelera={papelera} onRestaurar={restaurarDePapelera} onEliminarDefinitivo={eliminarDefinitivo} />
       )}
     </div>
   );
 }
 
-function Login({ admins, onCrearPrimerAdmin, onIniciarSesion, onEntrar, error: errorGuardado }) {
+function Login({ admins, onGuardarAdmin, onEntrar, error: errorGuardado }) {
   const [vista, setVista] = useState("landing"); // 'landing' | 'adminAuth'
   const [usuarioAdmin, setUsuarioAdmin] = useState("");
   const [passAdmin, setPassAdmin] = useState("");
   const [passAdmin2, setPassAdmin2] = useState("");
   const [error, setError] = useState("");
-  const [cargando, setCargando] = useState(false);
 
   const esPrimerAdmin = admins.length === 0;
 
@@ -934,26 +786,25 @@ function Login({ admins, onCrearPrimerAdmin, onIniciarSesion, onEntrar, error: e
     setUsuarioAdmin(""); setPassAdmin(""); setPassAdmin2(""); setError("");
   };
 
-  const iniciarSesionAdmin = async () => {
+  const iniciarSesionAdmin = () => {
     setError("");
     const u = usuarioAdmin.trim();
     if (!u || !passAdmin) { setError("Completa el usuario y la contraseña."); return; }
-    setCargando(true);
-    const resultado = await onIniciarSesion(u, passAdmin);
-    setCargando(false);
-    if (!resultado.ok) setError(resultado.error);
+    const encontrado = admins.find((a) => a.usuario.toLowerCase() === u.toLowerCase());
+    if (!encontrado) { setError("Ese usuario no existe. Pídele a un administrador que te cree una cuenta."); return; }
+    if (encontrado.password !== passAdmin) { setError("Contraseña incorrecta."); return; }
+    onEntrar({ tipo: "admin", usuario: encontrado.usuario });
   };
 
   const crearPrimerAdmin = async () => {
     setError("");
     const u = usuarioAdmin.trim();
     if (!u) { setError("Escribe un nombre de usuario."); return; }
-    if (passAdmin.length < 6) { setError("La contraseña debe tener al menos 6 caracteres."); return; }
+    if (passAdmin.length < 4) { setError("La contraseña debe tener al menos 4 caracteres."); return; }
     if (passAdmin !== passAdmin2) { setError("Las contraseñas no coinciden."); return; }
-    setCargando(true);
-    const resultado = await onCrearPrimerAdmin(u, passAdmin);
-    setCargando(false);
-    if (!resultado.ok) setError(resultado.error);
+    const nuevo = { usuario: u, password: passAdmin };
+    await onGuardarAdmin(nuevo);
+    onEntrar({ tipo: "admin", usuario: u });
   };
 
   if (vista === "adminAuth") {
@@ -968,18 +819,18 @@ function Login({ admins, onCrearPrimerAdmin, onIniciarSesion, onEntrar, error: e
             <div style={styles.confirmText}>Todavía no hay ningún administrador. Esta cuenta va a poder crear las demás cuentas de administrador.</div>
           )}
 
-          <input style={{ ...styles.input, marginTop: 12 }} placeholder="Usuario" value={usuarioAdmin} onChange={(e) => { setUsuarioAdmin(e.target.value); setError(""); }} disabled={cargando} />
-          <input style={{ ...styles.input, marginTop: 8 }} type="password" placeholder="Contraseña" value={passAdmin} onChange={(e) => { setPassAdmin(e.target.value); setError(""); }} onKeyDown={(e) => e.key === "Enter" && !esPrimerAdmin && iniciarSesionAdmin()} disabled={cargando} />
+          <input style={{ ...styles.input, marginTop: 12 }} placeholder="Usuario" value={usuarioAdmin} onChange={(e) => { setUsuarioAdmin(e.target.value); setError(""); }} />
+          <input style={{ ...styles.input, marginTop: 8 }} type="password" placeholder="Contraseña" value={passAdmin} onChange={(e) => { setPassAdmin(e.target.value); setError(""); }} onKeyDown={(e) => e.key === "Enter" && !esPrimerAdmin && iniciarSesionAdmin()} />
           {esPrimerAdmin && (
-            <input style={{ ...styles.input, marginTop: 8 }} type="password" placeholder="Repite la contraseña" value={passAdmin2} onChange={(e) => { setPassAdmin2(e.target.value); setError(""); }} disabled={cargando} />
+            <input style={{ ...styles.input, marginTop: 8 }} type="password" placeholder="Repite la contraseña" value={passAdmin2} onChange={(e) => { setPassAdmin2(e.target.value); setError(""); }} />
           )}
           {error && <div style={styles.errorText}>{error}</div>}
           {errorGuardado && <div style={styles.errorText}><AlertTriangle size={12} style={{ verticalAlign: "-2px" }} /> {errorGuardado}</div>}
 
           <div style={styles.loginNewRow}>
-            <button style={styles.cancelBtn} onClick={() => { setVista("landing"); resetAdminForm(); }} disabled={cargando}>Volver</button>
-            <button style={{ ...styles.loginEnterBtn, flex: 1 }} onClick={esPrimerAdmin ? crearPrimerAdmin : iniciarSesionAdmin} disabled={cargando}>
-              {cargando ? "Un momento…" : esPrimerAdmin ? "Crear y entrar" : "Entrar"}
+            <button style={styles.cancelBtn} onClick={() => { setVista("landing"); resetAdminForm(); }}>Volver</button>
+            <button style={{ ...styles.loginEnterBtn, flex: 1 }} onClick={esPrimerAdmin ? crearPrimerAdmin : iniciarSesionAdmin}>
+              {esPrimerAdmin ? "Crear y entrar" : "Entrar"}
             </button>
           </div>
         </div>
@@ -1048,7 +899,7 @@ function TopBar({ sesion, onCambiar, onHistorial, onSolicitudes, vistaActiva, hi
 
 /* ---------------- Inventario ---------------- */
 
-function Inventario({ productos, solicitudes, onGuardarProducto, esAdmin, sesion, admins, onCrearAdmin, onEliminarAdmin, onCambiarPasswordPropia, comisionistas, onGuardarComisionista, onEliminarComisionista, onCambiarEstado, onEliminar, papelera, onRestaurar, onEliminarDefinitivo }) {
+function Inventario({ productos, solicitudes, onGuardarProducto, esAdmin, sesion, admins, onGuardarAdmin, onEliminarAdmin, comisionistas, onGuardarComisionista, onEliminarComisionista, onCambiarEstado, onEliminar, papelera, onRestaurar, onEliminarDefinitivo }) {
   const [filtro, setFiltro] = useState("disponible");
   const [filtroCategoria, setFiltroCategoria] = useState("todas");
   const [categoriaAbierta, setCategoriaAbierta] = useState(false);
@@ -1143,7 +994,7 @@ function Inventario({ productos, solicitudes, onGuardarProducto, esAdmin, sesion
   };
 
   if (showConfig) {
-    return <AdminPanel admins={admins} onCrearAdmin={onCrearAdmin} onEliminarAdmin={onEliminarAdmin} onCambiarPasswordPropia={onCambiarPasswordPropia} comisionistas={comisionistas} onGuardarComisionista={onGuardarComisionista} onEliminarComisionista={onEliminarComisionista} sesion={sesion} onClose={() => setShowConfig(false)} papelera={papelera} onRestaurar={onRestaurar} onEliminarDefinitivo={onEliminarDefinitivo} />;
+    return <AdminPanel admins={admins} onGuardarAdmin={onGuardarAdmin} onEliminarAdmin={onEliminarAdmin} comisionistas={comisionistas} onGuardarComisionista={onGuardarComisionista} onEliminarComisionista={onEliminarComisionista} sesion={sesion} onClose={() => setShowConfig(false)} papelera={papelera} onRestaurar={onRestaurar} onEliminarDefinitivo={onEliminarDefinitivo} />;
   }
 
   if (showForm && esAdmin) {
@@ -1618,33 +1469,30 @@ function ProductoDetalle({ producto, esAdmin, sesion, comisionistas, onBack, onE
   );
 }
 
-function AdminPanel({ admins, onCrearAdmin, onEliminarAdmin, onCambiarPasswordPropia, comisionistas, onGuardarComisionista, onEliminarComisionista, sesion, onClose, papelera, onRestaurar, onEliminarDefinitivo }) {
+function AdminPanel({ admins, onGuardarAdmin, onEliminarAdmin, comisionistas, onGuardarComisionista, onEliminarComisionista, sesion, onClose, papelera, onRestaurar, onEliminarDefinitivo }) {
   const [actual, setActual] = useState("");
   const [nueva, setNueva] = useState("");
   const [nueva2, setNueva2] = useState("");
   const [error, setError] = useState("");
   const [guardado, setGuardado] = useState(false);
-  const [cambiando, setCambiando] = useState(false);
 
   const [nuevoUsuario, setNuevoUsuario] = useState("");
   const [nuevoPass, setNuevoPass] = useState("");
   const [nuevoPass2, setNuevoPass2] = useState("");
   const [errorNuevo, setErrorNuevo] = useState("");
   const [creado, setCreado] = useState(false);
-  const [creando, setCreando] = useState(false);
 
   const [nuevoComisionista, setNuevoComisionista] = useState("");
   const [errorComisionista, setErrorComisionista] = useState("");
 
+  const yo = admins.find((a) => a.usuario === sesion.usuario);
+
   const cambiar = async () => {
     setError("");
-    if (!actual) { setError("Escribe tu contraseña actual."); return; }
-    if (nueva.length < 6) { setError("La nueva contraseña debe tener al menos 6 caracteres."); return; }
+    if (!yo || actual !== yo.password) { setError("La contraseña actual no coincide."); return; }
+    if (nueva.length < 4) { setError("La nueva contraseña debe tener al menos 4 caracteres."); return; }
     if (nueva !== nueva2) { setError("Las contraseñas nuevas no coinciden."); return; }
-    setCambiando(true);
-    const resultado = await onCambiarPasswordPropia(actual, nueva);
-    setCambiando(false);
-    if (!resultado.ok) { setError(resultado.error); return; }
+    await onGuardarAdmin({ ...yo, password: nueva });
     setGuardado(true);
     setActual(""); setNueva(""); setNueva2("");
     setTimeout(() => setGuardado(false), 2000);
@@ -1655,12 +1503,9 @@ function AdminPanel({ admins, onCrearAdmin, onEliminarAdmin, onCambiarPasswordPr
     const u = nuevoUsuario.trim();
     if (!u) { setErrorNuevo("Escribe un nombre de usuario."); return; }
     if (admins.some((a) => a.usuario.toLowerCase() === u.toLowerCase())) { setErrorNuevo("Ese usuario ya existe."); return; }
-    if (nuevoPass.length < 6) { setErrorNuevo("La contraseña debe tener al menos 6 caracteres."); return; }
+    if (nuevoPass.length < 4) { setErrorNuevo("La contraseña debe tener al menos 4 caracteres."); return; }
     if (nuevoPass !== nuevoPass2) { setErrorNuevo("Las contraseñas no coinciden."); return; }
-    setCreando(true);
-    const resultado = await onCrearAdmin(u, nuevoPass);
-    setCreando(false);
-    if (!resultado.ok) { setErrorNuevo(resultado.error); return; }
+    await onGuardarAdmin({ usuario: u, password: nuevoPass });
     setNuevoUsuario(""); setNuevoPass(""); setNuevoPass2("");
     setCreado(true);
     setTimeout(() => setCreado(false), 2000);
@@ -1711,7 +1556,7 @@ function AdminPanel({ admins, onCrearAdmin, onEliminarAdmin, onCambiarPasswordPr
         <input style={{ ...styles.input, marginTop: 8 }} type="password" placeholder="Contraseña" value={nuevoPass} onChange={(e) => { setNuevoPass(e.target.value); setErrorNuevo(""); }} />
         <input style={{ ...styles.input, marginTop: 8 }} type="password" placeholder="Repite la contraseña" value={nuevoPass2} onChange={(e) => { setNuevoPass2(e.target.value); setErrorNuevo(""); }} />
         {errorNuevo && <div style={styles.errorText}>{errorNuevo}</div>}
-        <button style={styles.saveBtnSecondary} onClick={agregarAdmin} disabled={creando}>{creando ? "Creando…" : creado ? <><Check size={16} /> Administrador agregado</> : <><Plus size={16} /> Agregar administrador</>}</button>
+        <button style={styles.saveBtnSecondary} onClick={agregarAdmin}>{creado ? <><Check size={16} /> Administrador agregado</> : <><Plus size={16} /> Agregar administrador</>}</button>
 
         <div style={styles.divider} />
 
@@ -1772,7 +1617,7 @@ function AdminPanel({ admins, onCrearAdmin, onEliminarAdmin, onCambiarPasswordPr
         <input style={{ ...styles.input, marginTop: 8 }} type="password" placeholder="Nueva contraseña" value={nueva} onChange={(e) => setNueva(e.target.value)} />
         <input style={{ ...styles.input, marginTop: 8 }} type="password" placeholder="Repite la nueva contraseña" value={nueva2} onChange={(e) => setNueva2(e.target.value)} />
         {error && <div style={styles.errorText}>{error}</div>}
-        <button style={styles.saveBtn} onClick={cambiar} disabled={cambiando}>{cambiando ? "Guardando…" : guardado ? <><Check size={16} /> Guardada</> : "Guardar nueva contraseña"}</button>
+        <button style={styles.saveBtn} onClick={cambiar}>{guardado ? <><Check size={16} /> Guardada</> : "Guardar nueva contraseña"}</button>
       </div>
     </div>
   );
