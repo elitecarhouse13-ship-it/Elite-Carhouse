@@ -236,8 +236,9 @@ const firebaseConfig = {
 const firebaseApp = initializeApp(firebaseConfig);
 // Algunas redes (ciertos operadores móviles, wifis con filtros) bloquean el tipo de
 // conexión que Firestore usa por defecto (streaming), dejando pasar todo lo demás
-// sin problema. Esto lo detecta solo y cambia a "long polling" cuando hace falta.
-const db = initializeFirestore(firebaseApp, { experimentalAutoDetectLongPolling: true, useFetchStreams: false });
+// sin problema. Se fuerza "long polling" siempre, sin depender de que la detección
+// automática funcione bien en esa red.
+const db = initializeFirestore(firebaseApp, { experimentalForceLongPolling: true, useFetchStreams: false });
 const auth = getAuth(firebaseApp);
 
 // Firebase Authentication pide un correo, pero en la app los admins usan un
@@ -419,6 +420,12 @@ export default function App() {
   const [solicitudes, setSolicitudes] = useState([]);
   const [papelera, setPapelera] = useState([]); // [{ id, tipo, item, eliminadoPor, fechaEliminado }]
   const [loaded, setLoaded] = useState(false);
+  const [cargaLenta, setCargaLenta] = useState(false);
+  useEffect(() => {
+    if (loaded) return;
+    const t = setTimeout(() => setCargaLenta(true), 8000);
+    return () => clearTimeout(t);
+  }, [loaded]);
   const [vista, setVista] = useState("inventario"); // 'inventario' | 'historial' | 'solicitudes'
   const [, forceTick] = useState(0);
   const [notificaciones, setNotificaciones] = useState([]);
@@ -807,6 +814,11 @@ export default function App() {
       <div style={styles.loadingScreen}>
         <img src={LOGO_DATA_URL} alt="Elite Carhouse" style={styles.loadingLogo} />
         <div style={styles.loadingStamp}>CARGANDO INVENTARIO…</div>
+        {cargaLenta && (
+          <div style={{ ...styles.whatsappNota, maxWidth: 320, marginTop: 16 }}>
+            Esto está tardando más de lo normal — probablemente tu red esté bloqueando la conexión a la base de datos. Prueba cambiando de WiFi a datos móviles (o al revés), o desde otra red.
+          </div>
+        )}
       </div>
     );
   }
