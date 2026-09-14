@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import * as XLSX from "xlsx";
 import { initializeApp, deleteApp } from "firebase/app";
-import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot } from "firebase/firestore";
+import { initializeFirestore, collection, doc, setDoc, deleteDoc, onSnapshot } from "firebase/firestore";
 import {
   getAuth,
   initializeAuth,
@@ -234,7 +234,10 @@ const firebaseConfig = {
   appId: "1:108968406734:web:69fb3a935a9f87cd13ea9f",
 };
 const firebaseApp = initializeApp(firebaseConfig);
-const db = getFirestore(firebaseApp);
+// Algunas redes (ciertos operadores móviles, wifis con filtros) bloquean el tipo de
+// conexión que Firestore usa por defecto (streaming), dejando pasar todo lo demás
+// sin problema. Esto lo detecta solo y cambia a "long polling" cuando hace falta.
+const db = initializeFirestore(firebaseApp, { experimentalAutoDetectLongPolling: true, useFetchStreams: false });
 const auth = getAuth(firebaseApp);
 
 // Firebase Authentication pide un correo, pero en la app los admins usan un
