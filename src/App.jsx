@@ -19,11 +19,14 @@ const CATEGORIAS = [
 ];
 
 const CANALES_SUGERIDOS = [
-  { id: "facebook", label: "Facebook Marketplace", icon: Facebook },
+  { id: "facebook", label: "Marketplace", icon: Facebook },
   { id: "instagram", label: "Instagram", icon: Instagram },
   { id: "olx", label: "OLX", icon: Store },
   { id: "whatsapp", label: "Estados de WhatsApp", icon: MessageCircle },
 ];
+// En el formulario solo se sugiere este canal por defecto para no saturar la vista;
+// los demás (Instagram, OLX, etc.) se agregan a mano con el campo de texto libre.
+const CANAL_SUGERIDO_PRINCIPAL = CANALES_SUGERIDOS.find((c) => c.id === "facebook");
 
 const ESTADO_META = {
   disponible: { label: "Disponible", color: "#4FAE78" },
@@ -122,14 +125,23 @@ function construirDetallesVehiculo(d, categoria) {
   lineas.push(Number(d.duenos) > 1 ? `${d.duenos} dueños` : "Único dueño");
   if (d.kilometraje !== "" && d.kilometraje != null) lineas.push(`${Number(d.kilometraje).toLocaleString("es-CO")} km`);
   if (categoria === "vehiculo" && d.traccion) lineas.push(d.traccion);
-  if (categoria === "vehiculo") lineas.push(d.mantenimientosAlDia ? "Todos los mantenimientos al día" : "Mantenimientos pendientes por revisar");
-  if (categoria === "vehiculo" && d.clutchNuevo) lineas.push("Clutch nuevo");
-  if (d.soatHasta) lineas.push(`SOAT vigente hasta ${dateLabel(d.soatHasta)}`);
+  if (categoria === "vehiculo") {
+    let lineaMantenimiento = d.mantenimientosAlDia ? "Todos los mantenimientos al día" : "Mantenimientos pendientes por revisar";
+    if (d.mantenimientosDetalle && d.mantenimientosDetalle.trim()) lineaMantenimiento += ` — ${d.mantenimientosDetalle.trim()}`;
+    lineas.push(lineaMantenimiento);
+  }
+  if (d.soatEstado === "vigente" && d.soatHasta) lineas.push(`SOAT vigente hasta ${dateLabel(d.soatHasta)}`);
+  else if (d.soatEstado === "vencido") lineas.push("SOAT vencido");
   if (d.tecnomecanicaEstado === "vigente" && d.tecnomecanicaHasta) lineas.push(`Tecnomecánica vigente hasta ${dateLabel(d.tecnomecanicaHasta)}`);
   else if (d.tecnomecanicaEstado === "no_aplica") lineas.push("Tecnomecánica aún no aplica");
   else if (d.tecnomecanicaEstado === "vencida") lineas.push("Tecnomecánica vencida");
   if (d.transitoCiudad) lineas.push(`Tránsito de ${d.transitoCiudad}`);
   lineas.push(d.prenda ? `Prenda vigente${d.prendaEntidad ? ` con ${d.prendaEntidad}` : ""}` : "Sin prenda");
+  lineas.push(
+    d.tieneReclamaciones
+      ? (d.reclamacionesDetalle && d.reclamacionesDetalle.trim() ? `Reclamaciones: ${d.reclamacionesDetalle.trim()}` : "Tiene reclamaciones")
+      : "Sin reclamaciones"
+  );
   if (d.estadoGeneral && d.estadoGeneral.trim()) lineas.push(d.estadoGeneral.trim());
   return lineas.map((l) => `• ${l}`).join("\n");
 }
@@ -192,8 +204,20 @@ async function compartirProductoConFotos(producto, texto) {
     try {
       const archivos = fotos.map((f, i) => dataURLaArchivo(f, `foto-${i + 1}.jpg`));
       if (navigator.canShare({ files: archivos })) {
-        await navigator.share({ files: archivos, text: textoAUsar, title: producto.nombre });
-        return { ok: true };
+        const variasFotos = archivos.length > 1;
+        // Con una sola foto, WhatsApp pone el texto como pie de foto sin problema.
+        // Con varias fotos, si se manda el texto junto con los archivos, WhatsApp
+        // las reparte como mensajes separados (una foto + el texto repetido en cada una)
+        // en vez de agruparlas en un solo mensaje. Por eso, con más de una foto, el
+        // texto NO se manda con las fotos: se copia al portapapeles para pegarlo una
+        // sola vez como descripción del grupo completo dentro de WhatsApp.
+        if (variasFotos) {
+          try { await navigator.clipboard.writeText(textoAUsar); } catch {}
+          await navigator.share({ files: archivos, title: producto.nombre });
+        } else {
+          await navigator.share({ files: archivos, text: textoAUsar, title: producto.nombre });
+        }
+        return { ok: true, textoCopiadoParaFotos: variasFotos };
       }
     } catch (e) {
       if (e?.name === "AbortError") return { ok: true }; // el usuario cerró el panel, no es un error
@@ -202,15 +226,18 @@ async function compartirProductoConFotos(producto, texto) {
   }
   return { ok: false, texto: textoAUsar };
 }
+function descargarUnaFoto(dataUrl, nombreArchivo) {
+  const a = document.createElement("a");
+  a.href = dataUrl;
+  a.download = nombreArchivo;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
 function descargarFotosProducto(producto) {
   const fotos = fotosDeProducto(producto);
   fotos.forEach((f, i) => {
-    const a = document.createElement("a");
-    a.href = f;
-    a.download = `${(producto.nombre || "foto").replace(/\s+/g, "_")}-${i + 1}.jpg`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    descargarUnaFoto(f, `${(producto.nombre || "foto").replace(/\s+/g, "_")}-${i + 1}.jpg`);
   });
 }
 const firebaseConfig = {
@@ -1193,6 +1220,7 @@ function ProductoDetalle({ producto, esAdmin, sesion, comisionistas, onBack, onE
   const [fotoActiva, setFotoActiva] = useState(0);
   const [mostrarTexto, setMostrarTexto] = useState(false);
   const [copiado, setCopiado] = useState(false);
+  const [notaWhatsapp, setNotaWhatsapp] = useState(null);
   const catInfo = CATEGORIAS.find((c) => c.id === producto.categoria) || CATEGORIAS.find((c) => c.id === "otro");
   const Cat = catInfo.icon;
   const meta = ESTADO_META[producto.estado];
@@ -1226,7 +1254,10 @@ function ProductoDetalle({ producto, esAdmin, sesion, comisionistas, onBack, onE
 
   const abrirWhatsApp = async () => {
     const resultado = await compartirProductoConFotos(producto);
-    if (resultado.ok) return;
+    if (resultado.ok) {
+      setNotaWhatsapp(resultado.textoCopiadoParaFotos ? "Copiamos el texto al portapapeles: pégalo en WhatsApp como descripción del grupo de fotos (una sola vez, aplica a todas)." : null);
+      return;
+    }
     // El navegador no soporta compartir fotos (típico en computador de escritorio):
     // bajamos las fotos para que las adjunte a mano y abrimos WhatsApp solo con el texto.
     if (fotosDeProducto(producto).length > 0) descargarFotosProducto(producto);
@@ -1236,7 +1267,10 @@ function ProductoDetalle({ producto, esAdmin, sesion, comisionistas, onBack, onE
   const abrirWhatsAppInterno = async () => {
     const texto = textoFichaInterna(producto);
     const resultado = await compartirProductoConFotos(producto, texto);
-    if (resultado.ok) return;
+    if (resultado.ok) {
+      setNotaWhatsapp(resultado.textoCopiadoParaFotos ? "Copiamos la ficha interna al portapapeles: pégala en WhatsApp como descripción del grupo de fotos." : null);
+      return;
+    }
     if (fotosDeProducto(producto).length > 0) descargarFotosProducto(producto);
     window.open(`https://wa.me/?text=${encodeURIComponent(resultado.texto)}`, "_blank");
   };
@@ -1257,6 +1291,13 @@ function ProductoDetalle({ producto, esAdmin, sesion, comisionistas, onBack, onE
           <div style={styles.detallePhotoWrap}>
             <img src={fotos[fotoActiva] || fotos[0]} alt={producto.nombre} style={styles.detallePhoto} />
             <span style={{ ...styles.cardBadge, ...styles.cardBadgeOnPhoto, background: meta.color }}>{meta.label}</span>
+            <button
+              style={styles.photoDownloadBtn}
+              title="Descargar esta foto"
+              onClick={() => descargarUnaFoto(fotos[fotoActiva] || fotos[0], `${(producto.nombre || "foto").replace(/\s+/g, "_")}-${fotoActiva + 1}.jpg`)}
+            >
+              <Download size={15} />
+            </button>
             {fotos.length > 1 && (
               <div style={styles.thumbStrip}>
                 {fotos.map((f, i) => (
@@ -1374,14 +1415,19 @@ function ProductoDetalle({ producto, esAdmin, sesion, comisionistas, onBack, onE
           <div style={styles.smallLabel}>TEXTO PARA PUBLICAR</div>
           <pre style={styles.textoPub}>{textoPublicacion(producto)}</pre>
           <div style={styles.row8}>
-            <button style={styles.cancelBtn} onClick={() => setMostrarTexto(false)}>Cerrar</button>
+            <button style={styles.cancelBtn} onClick={() => { setMostrarTexto(false); setNotaWhatsapp(null); }}>Cerrar</button>
             <button style={styles.confirmSoldBtn} onClick={copiarTexto}>{copiado ? <><Check size={15} /> Copiado</> : <><Copy size={15} /> Copiar texto</>}</button>
           </div>
           <button style={styles.whatsappBtn} onClick={abrirWhatsApp}><MessageCircle size={15} /> Enviar por WhatsApp{fotos.length > 0 ? " (con fotos)" : ""}</button>
           {fotos.length > 0 && (
             <div style={styles.whatsappNota}>
-              En el celular se abre el panel para elegir WhatsApp y enviar el texto con las fotos juntas. En computador no se puede adjuntar fotos por enlace: se descargan solas y las adjuntas a mano en WhatsApp Web.
+              {fotos.length > 1
+                ? "En el celular se abre el panel para elegir WhatsApp con todas las fotos juntas en un solo mensaje. El texto no se manda junto con ellas (si se manda, WhatsApp lo repite foto por foto en vez de agruparlas): lo copiamos al portapapeles para que lo pegues una sola vez como descripción del grupo. En computador no se puede adjuntar fotos por enlace: se descargan solas y las adjuntas a mano en WhatsApp Web."
+                : "En el celular se abre el panel para elegir WhatsApp y enviar el texto con la foto junta. En computador no se puede adjuntar fotos por enlace: se descarga sola y la adjuntas a mano en WhatsApp Web."}
             </div>
+          )}
+          {notaWhatsapp && (
+            <div style={{ ...styles.whatsappNota, color: "#F2A876", fontWeight: 600 }}>{notaWhatsapp}</div>
           )}
           {esAdmin && (
             <>
@@ -1394,6 +1440,12 @@ function ProductoDetalle({ producto, esAdmin, sesion, comisionistas, onBack, onE
         </div>
       ) : (
         <button style={styles.textBtn} onClick={() => setMostrarTexto(true)}><Copy size={14} /> Generar texto para publicar</button>
+      )}
+
+      {fotos.length > 0 && (
+        <button style={styles.textBtn} onClick={() => descargarFotosProducto(producto)}>
+          <Download size={14} /> Descargar {fotos.length > 1 ? `todas las fotos (${fotos.length})` : "la foto"}
+        </button>
       )}
 
       {!esAdmin && (
@@ -1634,10 +1686,13 @@ function ProductoForm({ inicial, onCancel, onGuardar }) {
   const [duenos, setDuenos] = useState(inicial?.duenos ?? 1);
   const [traccion, setTraccion] = useState(inicial?.traccion || "");
   const [mantenimientosAlDia, setMantenimientosAlDia] = useState(inicial?.mantenimientosAlDia ?? true);
-  const [clutchNuevo, setClutchNuevo] = useState(inicial?.clutchNuevo ?? false);
+  const [mantenimientosDetalle, setMantenimientosDetalle] = useState(inicial?.mantenimientosDetalle || "");
+  const [soatEstado, setSoatEstado] = useState(inicial?.soatEstado || "");
   const [soatHasta, setSoatHasta] = useState(inicial?.soatHasta || "");
   const [tecnomecanicaEstado, setTecnomecanicaEstado] = useState(inicial?.tecnomecanicaEstado || "");
   const [tecnomecanicaHasta, setTecnomecanicaHasta] = useState(inicial?.tecnomecanicaHasta || "");
+  const [tieneReclamaciones, setTieneReclamaciones] = useState(inicial?.tieneReclamaciones ?? false);
+  const [reclamacionesDetalle, setReclamacionesDetalle] = useState(inicial?.reclamacionesDetalle || "");
   const [transitoCiudad, setTransitoCiudad] = useState(inicial?.transitoCiudad || "");
   const [prenda, setPrenda] = useState(inicial?.prenda ?? false);
   const [prendaEntidad, setPrendaEntidad] = useState(inicial?.prendaEntidad || "");
@@ -1691,7 +1746,8 @@ function ProductoForm({ inicial, onCancel, onGuardar }) {
       if (kilometraje === "") faltantes.push("Kilometraje");
       if (!duenos) faltantes.push("Número de dueños");
       if (categoria === "vehiculo" && !traccion) faltantes.push("Tracción");
-      if (!soatHasta) faltantes.push("SOAT vigente hasta");
+      if (!soatEstado) faltantes.push("SOAT");
+      if (soatEstado === "vigente" && !soatHasta) faltantes.push("Fecha de SOAT");
       if (!tecnomecanicaEstado) faltantes.push("Tecnomecánica");
       if (tecnomecanicaEstado === "vigente" && !tecnomecanicaHasta) faltantes.push("Fecha de tecnomecánica");
       if (!transitoCiudad.trim()) faltantes.push("Tránsito");
@@ -1702,7 +1758,7 @@ function ProductoForm({ inicial, onCancel, onGuardar }) {
         return;
       }
       detallesFinal = construirDetallesVehiculo(
-        { duenos, kilometraje, traccion, mantenimientosAlDia, clutchNuevo, soatHasta, tecnomecanicaEstado, tecnomecanicaHasta, transitoCiudad, prenda, prendaEntidad, estadoGeneral },
+        { duenos, kilometraje, traccion, mantenimientosAlDia, mantenimientosDetalle, soatEstado, soatHasta, tecnomecanicaEstado, tecnomecanicaHasta, transitoCiudad, prenda, prendaEntidad, tieneReclamaciones, reclamacionesDetalle, estadoGeneral },
         categoria
       );
     }
@@ -1721,13 +1777,16 @@ function ProductoForm({ inicial, onCancel, onGuardar }) {
         duenos: Number(duenos),
         traccion: categoria === "vehiculo" ? traccion : "",
         mantenimientosAlDia: categoria === "vehiculo" ? mantenimientosAlDia : null,
-        clutchNuevo: categoria === "vehiculo" ? clutchNuevo : false,
-        soatHasta,
+        mantenimientosDetalle: categoria === "vehiculo" ? mantenimientosDetalle.trim() : "",
+        soatEstado,
+        soatHasta: soatEstado === "vigente" ? soatHasta : "",
         tecnomecanicaEstado,
         tecnomecanicaHasta: tecnomecanicaEstado === "vigente" ? tecnomecanicaHasta : "",
         transitoCiudad: transitoCiudad.trim(),
         prenda,
         prendaEntidad: prenda ? prendaEntidad.trim() : "",
+        tieneReclamaciones,
+        reclamacionesDetalle: tieneReclamaciones ? reclamacionesDetalle.trim() : "",
         estadoGeneral: estadoGeneral.trim(),
       } : {}),
     });
@@ -1781,13 +1840,14 @@ function ProductoForm({ inicial, onCancel, onGuardar }) {
 
         {esVehiculoOMoto ? (
           <>
+            <div style={styles.sectionDivider} />
             <div style={styles.eyebrow}>CARACTERÍSTICAS OBLIGATORIAS</div>
 
             <div style={styles.smallLabel}>AÑO MODELO</div>
             <input style={styles.input} type="number" placeholder="Ej: 2023" value={anioModelo} onChange={(e) => setAnioModelo(e.target.value)} />
 
             <div style={styles.smallLabel}>KILOMETRAJE</div>
-            <input style={styles.input} type="number" placeholder="Ej: 80000" value={kilometraje} onChange={(e) => setKilometraje(e.target.value)} />
+            <PrecioInput style={styles.input} placeholder="Ej: 80.000" value={kilometraje} onChange={setKilometraje} />
 
             <div style={styles.smallLabel}>NÚMERO DE DUEÑOS</div>
             <input style={styles.input} type="number" min="1" value={duenos} onChange={(e) => setDuenos(e.target.value)} />
@@ -1806,15 +1866,19 @@ function ProductoForm({ inicial, onCancel, onGuardar }) {
                   <input type="checkbox" checked={mantenimientosAlDia} onChange={(e) => setMantenimientosAlDia(e.target.checked)} />
                   Todos los mantenimientos al día
                 </label>
-                <label style={styles.checkboxRow}>
-                  <input type="checkbox" checked={clutchNuevo} onChange={(e) => setClutchNuevo(e.target.checked)} />
-                  Clutch nuevo
-                </label>
+                <input style={{ ...styles.input, marginTop: 2, marginBottom: 8 }} placeholder="Detalle (opcional) — ej: se entrega con historial de mantenimiento" value={mantenimientosDetalle} onChange={(e) => setMantenimientosDetalle(e.target.value)} />
               </>
             )}
 
-            <div style={styles.smallLabel}>SOAT VIGENTE HASTA</div>
-            <input style={styles.input} type="date" value={soatHasta} onChange={(e) => setSoatHasta(e.target.value)} />
+            <div style={styles.smallLabel}>SOAT</div>
+            <select style={styles.input} value={soatEstado} onChange={(e) => setSoatEstado(e.target.value)}>
+              <option value="">Selecciona…</option>
+              <option value="vigente">Vigente hasta…</option>
+              <option value="vencido">Vencido</option>
+            </select>
+            {soatEstado === "vigente" && (
+              <input style={{ ...styles.input, marginTop: 8 }} type="date" value={soatHasta} onChange={(e) => setSoatHasta(e.target.value)} />
+            )}
 
             <div style={styles.smallLabel}>TECNOMECÁNICA</div>
             <select style={styles.input} value={tecnomecanicaEstado} onChange={(e) => setTecnomecanicaEstado(e.target.value)}>
@@ -1838,6 +1902,14 @@ function ProductoForm({ inicial, onCancel, onGuardar }) {
               <input style={styles.input} placeholder="Entidad (ej: Finesa)" value={prendaEntidad} onChange={(e) => setPrendaEntidad(e.target.value)} />
             )}
 
+            <label style={styles.checkboxRow}>
+              <input type="checkbox" checked={tieneReclamaciones} onChange={(e) => setTieneReclamaciones(e.target.checked)} />
+              Tiene reclamaciones
+            </label>
+            {tieneReclamaciones && (
+              <input style={styles.input} placeholder="¿Cuáles? (ej: golpe puerta derecha, cambio de parabrisas)" value={reclamacionesDetalle} onChange={(e) => setReclamacionesDetalle(e.target.value)} />
+            )}
+
             <div style={styles.smallLabel}>ESTADO GENERAL</div>
             <input style={styles.input} placeholder="Ej: Excelente estado general" value={estadoGeneral} onChange={(e) => setEstadoGeneral(e.target.value)} />
 
@@ -1853,27 +1925,31 @@ function ProductoForm({ inicial, onCancel, onGuardar }) {
         <div style={styles.smallLabel}>NOTAS INTERNAS (solo para el equipo)</div>
         <textarea style={styles.textarea} placeholder="Ej: incluye rines nuevos, el cliente pidió separar el sofá…" value={notas} onChange={(e) => setNotas(e.target.value)} />
 
-        <div style={styles.smallLabel}>PUBLICADO EN</div>
+        <div style={{ ...styles.smallLabel, marginTop: 24 }}>PUBLICADO EN</div>
         <div style={styles.canalesGrid}>
-          {CANALES_SUGERIDOS.map((c) => {
-            const Icon = c.icon;
-            const activo = canales.includes(c.id);
+          {CANAL_SUGERIDO_PRINCIPAL && (() => {
+            const Icon = CANAL_SUGERIDO_PRINCIPAL.icon;
+            const activo = canales.includes(CANAL_SUGERIDO_PRINCIPAL.id);
             return (
-              <button key={c.id} style={{ ...styles.canalChip, ...(activo ? styles.canalChipActive : {}) }} onClick={() => toggleCanal(c.id)}>
-                <Icon size={14} /> {c.label} {activo && <Check size={12} />}
+              <button style={{ ...styles.canalChip, ...(activo ? styles.canalChipActive : {}) }} onClick={() => toggleCanal(CANAL_SUGERIDO_PRINCIPAL.id)}>
+                <Icon size={14} /> {CANAL_SUGERIDO_PRINCIPAL.label} {activo && <Check size={12} />}
+              </button>
+            );
+          })()}
+          {canales.filter((c) => c !== CANAL_SUGERIDO_PRINCIPAL?.id).map((c) => {
+            const conocido = CANALES_SUGERIDOS.find((s) => s.id === c);
+            return (
+              <button key={c} style={{ ...styles.canalChip, ...styles.canalChipActive }} onClick={() => toggleCanal(c)}>
+                {conocido ? conocido.label : c} <Check size={12} />
               </button>
             );
           })}
-          {canales.filter((c) => !CANALES_SUGERIDOS.some((s) => s.id === c)).map((c) => (
-            <button key={c} style={{ ...styles.canalChip, ...styles.canalChipActive }} onClick={() => toggleCanal(c)}>
-              {c} <Check size={12} />
-            </button>
-          ))}
         </div>
-        <div style={styles.row8}>
-          <input style={{ ...styles.input, flex: 1 }} placeholder="Otro canal (ej: vitrina física)" value={canalCustom} onChange={(e) => setCanalCustom(e.target.value)} />
-          <button style={styles.smallAddBtn} onClick={() => { if (canalCustom.trim()) { setCanales([...canales, canalCustom.trim()]); setCanalCustom(""); } }}><Plus size={14} /></button>
+        <div style={{ ...styles.row8, marginTop: 10 }}>
+          <input style={{ ...styles.input, flex: 1, minWidth: 0 }} placeholder="Otro canal (ej: Instagram, vitrina física)" value={canalCustom} onChange={(e) => setCanalCustom(e.target.value)} />
+          <button style={{ ...styles.smallAddBtn, flexShrink: 0 }} onClick={() => { if (canalCustom.trim()) { setCanales([...canales, canalCustom.trim()]); setCanalCustom(""); } }}><Plus size={14} /></button>
         </div>
+        <div style={styles.canalesNota}>Toca un canal para quitarlo de la lista.</div>
 
         <button style={styles.saveBtn} onClick={guardar}><Check size={16} /> {inicial ? "Guardar cambios" : "Publicar"}</button>
       </div>
@@ -2514,6 +2590,7 @@ const styles = {
   detalleHead: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 },
   backBtn: { display: "flex", alignItems: "center", gap: 4, background: "none", border: "none", color: "#B0A89B", fontSize: 13, fontWeight: 600, cursor: "pointer" },
   editIconBtn: { width: 34, height: 34, borderRadius: 10, border: "1px solid #332C25", background: "#1E1A17", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "#B0A89B" },
+  photoDownloadBtn: { position: "absolute", top: 10, left: 10, width: 30, height: 30, borderRadius: 8, border: "none", background: "rgba(15,13,11,0.72)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "#FFFFFF", boxShadow: "0 2px 8px rgba(0,0,0,0.4)" },
 
   detalleCard: { position: "relative", overflow: "hidden", background: "#1E1A17", border: "1px solid #302A24", borderRadius: 18, padding: 22, marginBottom: 18, boxShadow: "0 8px 28px rgba(0,0,0,0.3)" },
   detalleIconRow: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 },
@@ -2572,6 +2649,8 @@ const styles = {
   adminRowName: { display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 600, color: "#F4F0E9" },
   adminRemoveBtn: { background: "none", border: "none", color: "#E2503B", cursor: "pointer", padding: 4, display: "flex", alignItems: "center" },
   divider: { height: 1, background: "#302A24", margin: "26px 0 6px" },
+  sectionDivider: { height: 1, background: "#302A24", margin: "30px 0 4px" },
+  canalesNota: { fontSize: 11.5, color: "#7A7268", lineHeight: 1.4, marginTop: 8, textAlign: "left" },
 
   photoUploadText: { fontSize: 12.5, color: "#7A7268", fontWeight: 600 },
   photoChangeBtn: { position: "absolute", left: 10, bottom: 10, display: "flex", alignItems: "center", gap: 5, background: "rgba(15,13,11,0.8)", color: "#FFFFFF", border: "none", borderRadius: 10, padding: "8px 12px", fontSize: 11.5, fontWeight: 600, cursor: "pointer" },
