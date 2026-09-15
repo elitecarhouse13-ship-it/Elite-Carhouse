@@ -866,11 +866,15 @@ function Login({ admins, onGuardarAdmin, onEntrar, error: errorGuardado }) {
   const [passAdmin, setPassAdmin] = useState("");
   const [passAdmin2, setPassAdmin2] = useState("");
   const [error, setError] = useState("");
+  const [migrando, setMigrando] = useState(null); // cuenta vieja verificada que necesita contraseña nueva (min 6) para pasar a Firebase Auth
+  const [passNueva, setPassNueva] = useState("");
+  const [passNueva2, setPassNueva2] = useState("");
 
   const esPrimerAdmin = admins.length === 0;
 
   const resetAdminForm = () => {
     setUsuarioAdmin(""); setPassAdmin(""); setPassAdmin2(""); setError("");
+    setMigrando(null); setPassNueva(""); setPassNueva2("");
   };
 
   const iniciarSesionAdmin = async () => {
@@ -884,6 +888,12 @@ function Login({ admins, onGuardarAdmin, onEntrar, error: errorGuardado }) {
         // Cuenta creada antes de activar Firebase Authentication: se migra en este
         // mismo login, sin que la persona note nada distinto.
         if (encontrado.password !== passAdmin) { setError("Contraseña incorrecta."); return; }
+        if (encontrado.password.length < 6) {
+          // Firebase exige mínimo 6 caracteres y esta cuenta vieja tiene una más
+          // corta: no se puede migrar tal cual, hay que pedir una nueva antes de continuar.
+          setMigrando(encontrado);
+          return;
+        }
         const credencial = await createUserWithEmailAndPassword(auth, email, passAdmin);
         await onGuardarAdmin({ usuario: encontrado.usuario, email, uid: credencial.user.uid });
         await marcarSetupCompletoFS();
@@ -900,11 +910,26 @@ function Login({ admins, onGuardarAdmin, onEntrar, error: errorGuardado }) {
     }
   };
 
+  const completarMigracion = async () => {
+    setError("");
+    if (passNueva.length < 6) { setError("La nueva contraseña debe tener al menos 6 caracteres."); return; }
+    if (passNueva !== passNueva2) { setError("Las contraseñas no coinciden."); return; }
+    try {
+      const email = emailDeUsuario(migrando.usuario);
+      const credencial = await createUserWithEmailAndPassword(auth, email, passNueva);
+      await onGuardarAdmin({ usuario: migrando.usuario, email, uid: credencial.user.uid });
+      await marcarSetupCompletoFS();
+      onEntrar({ tipo: "admin", usuario: migrando.usuario, uid: credencial.user.uid });
+    } catch (e) {
+      setError("No se pudo actualizar la cuenta: " + (e?.message || "intenta de nuevo."));
+    }
+  };
+
   const crearPrimerAdmin = async () => {
     setError("");
     const u = usuarioAdmin.trim();
     if (!u) { setError("Escribe un nombre de usuario."); return; }
-    if (passAdmin.length < 4) { setError("La contraseña debe tener al menos 4 caracteres."); return; }
+    if (passAdmin.length < 6) { setError("La contraseña debe tener al menos 6 caracteres."); return; }
     if (passAdmin !== passAdmin2) { setError("Las contraseñas no coinciden."); return; }
     try {
       const email = emailDeUsuario(u);
@@ -916,6 +941,29 @@ function Login({ admins, onGuardarAdmin, onEntrar, error: errorGuardado }) {
       setError("No se pudo crear la cuenta: " + (e?.message || "intenta de nuevo."));
     }
   };
+
+  if (migrando) {
+    return (
+      <div style={styles.loginScreen}>
+        <style>{fontImports}</style>
+        <img src={LOGO_DATA_URL} alt="Elite Carhouse" style={styles.loginLogo} />
+        <div style={styles.loginCard}>
+          <div style={styles.loginEyebrow}>ACTUALIZACIÓN DE SEGURIDAD</div>
+          <div style={styles.loginTitle}>Crea una contraseña nueva</div>
+          <div style={styles.confirmText}>
+            Tu contraseña actual es correcta, pero es muy corta para el nuevo sistema de seguridad (mínimo 6 caracteres). Escribe una nueva — solo tienes que hacer esto una vez.
+          </div>
+          <input style={{ ...styles.input, marginTop: 12 }} type="password" placeholder="Nueva contraseña (mínimo 6)" value={passNueva} onChange={(e) => { setPassNueva(e.target.value); setError(""); }} />
+          <input style={{ ...styles.input, marginTop: 8 }} type="password" placeholder="Repite la nueva contraseña" value={passNueva2} onChange={(e) => { setPassNueva2(e.target.value); setError(""); }} />
+          {error && <div style={styles.errorText}>{error}</div>}
+          <div style={styles.loginNewRow}>
+            <button style={styles.cancelBtn} onClick={() => { setMigrando(null); setPassNueva(""); setPassNueva2(""); setError(""); }}>Cancelar</button>
+            <button style={{ ...styles.loginEnterBtn, flex: 1 }} onClick={completarMigracion}>Guardar y entrar</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (vista === "adminAuth") {
     return (
@@ -1700,7 +1748,7 @@ function AdminPanel({ admins, onGuardarAdmin, onEliminarAdmin, comisionistas, on
   const cambiar = async () => {
     setError("");
     if (!yo) { setError("No se encontró tu cuenta."); return; }
-    if (nueva.length < 4) { setError("La nueva contraseña debe tener al menos 4 caracteres."); return; }
+    if (nueva.length < 6) { setError("La nueva contraseña debe tener al menos 6 caracteres."); return; }
     if (nueva !== nueva2) { setError("Las contraseñas nuevas no coinciden."); return; }
     try {
       const credencial = EmailAuthProvider.credential(yo.email, actual);
@@ -1720,7 +1768,7 @@ function AdminPanel({ admins, onGuardarAdmin, onEliminarAdmin, comisionistas, on
     const u = nuevoUsuario.trim();
     if (!u) { setErrorNuevo("Escribe un nombre de usuario."); return; }
     if (admins.some((a) => a.usuario.toLowerCase() === u.toLowerCase())) { setErrorNuevo("Ese usuario ya existe."); return; }
-    if (nuevoPass.length < 4) { setErrorNuevo("La contraseña debe tener al menos 4 caracteres."); return; }
+    if (nuevoPass.length < 6) { setErrorNuevo("La contraseña debe tener al menos 6 caracteres."); return; }
     if (nuevoPass !== nuevoPass2) { setErrorNuevo("Las contraseñas no coinciden."); return; }
     // Se crea la cuenta nueva en una instancia de Firebase separada, "de repuesto",
     // para que Firebase Auth no cierre TU sesión al crear la del otro administrador.
