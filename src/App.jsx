@@ -1,7 +1,11 @@
 import React, { useState, useEffect, useRef } from "react";
 import * as XLSX from "xlsx";
-import { initializeApp } from "firebase/app";
+import { initializeApp, deleteApp } from "firebase/app";
 import { initializeFirestore, memoryLocalCache, collection, doc, setDoc, deleteDoc, onSnapshot } from "firebase/firestore";
+import {
+  getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut,
+  onAuthStateChanged, updatePassword, EmailAuthProvider, reauthenticateWithCredential,
+} from "firebase/auth";
 import {
   Plus, Search, Car, Home, Package, X, Check, Bell, User,
   Facebook, Instagram, MessageCircle, Store, Trash2, Pencil,
@@ -125,71 +129,65 @@ function seguimientoInfo(s) {
 }
 function construirDetallesVehiculo(d, categoria) {
   const lineas = [];
-  lineas.push(Number(d.duenos) > 1 ? `${d.duenos} dueños` : "Único dueño");
-  if (d.kilometraje !== "" && d.kilometraje != null) lineas.push(`${Number(d.kilometraje).toLocaleString("es-CO")} km`);
-  if (categoria === "vehiculo" && d.traccion) lineas.push(d.traccion);
+  lineas.push(`👤 ${Number(d.duenos) > 1 ? `${d.duenos} dueños` : "Único dueño"}`);
+  if (d.kilometraje !== "" && d.kilometraje != null) lineas.push(`🛣️ ${Number(d.kilometraje).toLocaleString("es-CO")} km`);
+  if (categoria === "vehiculo" && d.traccion) lineas.push(`⚙️ ${d.traccion}`);
   if (categoria === "vehiculo") {
     let lineaMantenimiento = d.mantenimientosAlDia ? "Todos los mantenimientos al día" : "Mantenimientos pendientes por revisar";
     if (d.mantenimientosDetalle && d.mantenimientosDetalle.trim()) lineaMantenimiento += ` — ${d.mantenimientosDetalle.trim()}`;
-    lineas.push(lineaMantenimiento);
+    lineas.push(`🔧 ${lineaMantenimiento}`);
   }
-  if (d.soatEstado === "vigente" && d.soatHasta) lineas.push(`SOAT vigente hasta ${dateLabel(d.soatHasta)}`);
-  else if (d.soatEstado === "vencido") lineas.push("SOAT vencido");
-  if (d.tecnomecanicaEstado === "vigente" && d.tecnomecanicaHasta) lineas.push(`Tecnomecánica vigente hasta ${dateLabel(d.tecnomecanicaHasta)}`);
-  else if (d.tecnomecanicaEstado === "no_aplica") lineas.push("Tecnomecánica aún no aplica");
-  else if (d.tecnomecanicaEstado === "vencida") lineas.push("Tecnomecánica vencida");
-  if (d.transitoCiudad) lineas.push(`Tránsito de ${d.transitoCiudad}`);
-  lineas.push(d.prenda ? `Prenda vigente${d.prendaEntidad ? ` con ${d.prendaEntidad}` : ""}` : "Sin prenda");
+  if (d.soatEstado === "vigente" && d.soatHasta) lineas.push(`🛡️ SOAT vigente hasta ${dateLabel(d.soatHasta)}`);
+  else if (d.soatEstado === "vencido") lineas.push("🛡️ SOAT vencido");
+  if (d.tecnomecanicaEstado === "vigente" && d.tecnomecanicaHasta) lineas.push(`✅ Tecnomecánica vigente hasta ${dateLabel(d.tecnomecanicaHasta)}`);
+  else if (d.tecnomecanicaEstado === "no_aplica") lineas.push("✅ Tecnomecánica aún no aplica");
+  else if (d.tecnomecanicaEstado === "vencida") lineas.push("⚠️ Tecnomecánica vencida");
+  if (d.transitoCiudad) lineas.push(`📍 Tránsito de ${d.transitoCiudad}`);
+  lineas.push(d.prenda ? `🔒 Prenda vigente${d.prendaEntidad ? ` con ${d.prendaEntidad}` : ""}` : "🔓 Sin prenda");
   lineas.push(
     d.tieneReclamaciones
-      ? (d.reclamacionesDetalle && d.reclamacionesDetalle.trim() ? `Reclamaciones: ${d.reclamacionesDetalle.trim()}` : "Tiene reclamaciones")
-      : "Sin reclamaciones"
+      ? `⚠️ ${d.reclamacionesDetalle && d.reclamacionesDetalle.trim() ? `Reclamaciones: ${d.reclamacionesDetalle.trim()}` : "Tiene reclamaciones"}`
+      : "✅ Sin reclamaciones"
   );
-  if (d.estadoGeneral && d.estadoGeneral.trim()) lineas.push(d.estadoGeneral.trim());
-  return lineas.map((l) => `• ${l}`).join("\n");
+  if (d.estadoGeneral && d.estadoGeneral.trim()) lineas.push(`✨ ${d.estadoGeneral.trim()}`);
+  return lineas.join("\n");
 }
 function construirDetallesApartamento(d) {
   const lineas = [];
-  lineas.push(`${d.areaM2} m²`);
-  lineas.push(`${d.habitaciones} habitación${Number(d.habitaciones) === 1 ? "" : "es"}`);
-  lineas.push(`${d.banos} baño${Number(d.banos) === 1 ? "" : "s"}`);
-  lineas.push(Number(d.parqueaderos) > 0 ? `${d.parqueaderos} parqueadero${Number(d.parqueaderos) === 1 ? "" : "s"}` : "Sin parqueadero");
-  lineas.push(`Piso ${d.piso}`);
-  lineas.push(`Estrato ${d.estrato}`);
-  lineas.push(Number(d.administracion) > 0 ? `Administración: ${money(d.administracion)}/mes` : "Sin cuota de administración");
-  lineas.push(d.libreGravamen ? "Libre de gravamen" : `Con gravamen vigente${d.gravamenEntidad ? ` con ${d.gravamenEntidad}` : ""}`);
-  if (d.estadoEscritura === "completa") lineas.push("Escritura al 100%");
-  else if (d.estadoEscritura === "proindiviso") lineas.push(`Escritura en proindiviso${d.proindivisoPorcentaje ? ` al ${d.proindivisoPorcentaje}%` : ""}`);
-  else if (d.estadoEscritura === "en_proceso") lineas.push("Escrituras en proceso");
-  if (d.estadoEscritura === "completa") lineas.push("Aplica para crédito hipotecario");
-  else if (d.estadoEscritura === "proindiviso" || d.estadoEscritura === "en_proceso") lineas.push("No aplica para crédito hipotecario");
-  if (d.anioConstruccion) lineas.push(`Año de construcción: ${d.anioConstruccion}`);
-  lineas.push(d.amoblado ? "Amoblado" : "Sin amoblar");
-  lineas.push(d.depositoCuartoUtil ? "Con depósito / cuarto útil" : "Sin depósito / cuarto útil");
-  lineas.push(d.balconTerraza ? "Con balcón / terraza" : "Sin balcón / terraza");
-  if (d.zonasComunes && d.zonasComunes.length > 0) lineas.push(`Zonas comunes: ${d.zonasComunes.join(", ")}`);
-  return lineas.map((l) => `• ${l}`).join("\n");
+  lineas.push(`📐 ${d.areaM2} m²`);
+  lineas.push(`🛏️ ${d.habitaciones} habitación${Number(d.habitaciones) === 1 ? "" : "es"}`);
+  lineas.push(`🚿 ${d.banos} baño${Number(d.banos) === 1 ? "" : "s"}`);
+  lineas.push(Number(d.parqueaderos) > 0 ? `🅿️ ${d.parqueaderos} parqueadero${Number(d.parqueaderos) === 1 ? "" : "s"}` : "🅿️ Sin parqueadero");
+  lineas.push(`🏢 Piso ${d.piso}`);
+  lineas.push(`🏘️ Estrato ${d.estrato}`);
+  lineas.push(Number(d.administracion) > 0 ? `💳 Administración: ${money(d.administracion)}/mes` : "💳 Sin cuota de administración");
+  lineas.push(d.libreGravamen ? "🔓 Libre de gravamen" : `🔒 Con gravamen vigente${d.gravamenEntidad ? ` con ${d.gravamenEntidad}` : ""}`);
+  if (d.estadoEscritura === "completa") lineas.push("📜 Escritura al 100%");
+  else if (d.estadoEscritura === "proindiviso") lineas.push(`📜 Escritura en proindiviso${d.proindivisoPorcentaje ? ` al ${d.proindivisoPorcentaje}%` : ""}`);
+  else if (d.estadoEscritura === "en_proceso") lineas.push("📜 Escrituras en proceso");
+  if (d.estadoEscritura === "completa") lineas.push("🏦 Aplica para crédito hipotecario");
+  else if (d.estadoEscritura === "proindiviso" || d.estadoEscritura === "en_proceso") lineas.push("🏦 No aplica para crédito hipotecario");
+  if (d.anioConstruccion) lineas.push(`🏗️ Año de construcción: ${d.anioConstruccion}`);
+  lineas.push(d.amoblado ? "🛋️ Amoblado" : "🛋️ Sin amoblar");
+  lineas.push(d.depositoCuartoUtil ? "📦 Con depósito / cuarto útil" : "📦 Sin depósito / cuarto útil");
+  lineas.push(d.balconTerraza ? "🌇 Con balcón / terraza" : "🌇 Sin balcón / terraza");
+  if (d.zonasComunes && d.zonasComunes.length > 0) lineas.push(`🎉 Zonas comunes: ${d.zonasComunes.join(", ")}`);
+  return lineas.join("\n");
 }
 function textoPublicacion(p) {
-  if ((p.categoria === "vehiculo" || p.categoria === "moto") && p.anioModelo) {
-    const lineas = [
-      `${p.nombre} – MODELO ${p.anioModelo}`,
-      "",
-      `Precio $ ${money(p.precioBase)}`,
-      "",
-      p.detalles,
-      "",
-      "📲 Escríbeme para más información o para agendar visita.",
-    ];
-    return lineas.filter((l) => l !== null && l !== undefined).join("\n");
-  }
-  const catInfo = CATEGORIAS.find((c) => c.id === p.categoria);
+  const catEmoji = { vehiculo: "🚗", moto: "🏍️", apartamento: "🏠", otro: "📦" }[p.categoria] || "🏷️";
+  const esVehiculoConModelo = (p.categoria === "vehiculo" || p.categoria === "moto") && p.anioModelo;
+  const titulo = esVehiculoConModelo ? `${p.nombre.toUpperCase()} – MODELO ${p.anioModelo}` : p.nombre.toUpperCase();
   const lineas = [
-    catInfo ? `${catInfo.label.replace(/s$/, "")}: ${p.nombre}` : p.nombre,
+    `${catEmoji} ${titulo}`,
+    "━━━━━━━━━━━━━━━━━━",
+    `💰 ${money(p.precioBase)}`,
+    "",
     p.detalles,
-    `Precio: ${money(p.precioBase)}`,
+    "",
+    "📲 Escríbeme para más información o para agendar visita.",
   ];
-  return lineas.filter(Boolean).join("\n");
+  return lineas.filter((l) => l !== null && l !== undefined).join("\n");
 }
 function dataURLaArchivo(dataUrl, nombreArchivo) {
   const [encabezado, base64] = dataUrl.split(",");
@@ -285,6 +283,24 @@ const db = initializeFirestore(firebaseApp, {
   useFetchStreams: false,
   localCache: memoryLocalCache(),
 });
+const auth = getAuth(firebaseApp);
+// Los administradores inician sesión con un "usuario" corto (no un correo), pero
+// Firebase Authentication solo maneja correo+contraseña. Este helper convierte el
+// usuario en un correo interno inventado y siempre igual para esa persona, así el
+// login real ocurre contra Firebase Auth (seguro) sin cambiar la experiencia del equipo.
+function emailDeUsuario(usuario) {
+  return `${usuario.trim().toLowerCase().replace(/\s+/g, "")}@elitecarhouse-auth.app`;
+}
+// Marca que ya existe al menos un administrador real. Las reglas de seguridad de
+// Firestore usan este documento para saber que la "puerta de arranque" (crear el
+// primer administrador sin estar autenticado todavía) ya se puede cerrar.
+async function marcarSetupCompletoFS() {
+  try {
+    await setDoc(doc(db, "config", "setup"), { primerAdminCreado: true });
+  } catch (e) {
+    console.error("No se pudo marcar el setup como completo:", e);
+  }
+}
 // Pide permiso de notificaciones al navegador. Estas son "notificaciones locales":
 // avisan mientras la app está abierta (aunque esté minimizada o en otra pestaña),
 // pero no llegan si el navegador está completamente cerrado — para eso se necesitaría
@@ -393,8 +409,8 @@ const DEMO_PRODUCTOS = [
 ];
 
 export default function App() {
-  const [sesion, setSesion] = useState(null); // { tipo: 'vendedor' } | { tipo: 'admin', usuario }
-  const [admins, setAdmins] = useState([]); // [{ usuario, password }]
+  const [sesion, setSesion] = useState(null); // { tipo: 'vendedor' } | { tipo: 'admin', usuario, uid }
+  const [admins, setAdmins] = useState([]); // [{ usuario, email, uid }] (uid = Firebase Auth uid, es el ID del documento)
   const [comisionistas, setComisionistas] = useState([]); // [{ nombre }]
   const [productos, setProductos] = useState(DEMO_PRODUCTOS);
   const [solicitudes, setSolicitudes] = useState([]);
@@ -494,6 +510,25 @@ export default function App() {
     const clock = setInterval(() => forceTick((t) => t + 1), 1000);
     return () => { unsubProductos(); unsubAdmins(); unsubComisionistas(); unsubSolicitudes(); unsubPapelera(); unsubAvisos(); clearInterval(clock); };
   }, []);
+
+  // Si el navegador ya tenía una sesión de Firebase Auth activa (por ejemplo, tras
+  // recargar la página), la restaura automáticamente en vez de mandar al login.
+  useEffect(() => {
+    if (!loaded || sesion !== null) return;
+    const unsub = onAuthStateChanged(auth, (usuarioFirebase) => {
+      if (!usuarioFirebase) return;
+      const match = admins.find((a) => a.uid === usuarioFirebase.uid);
+      if (match) setSesion({ tipo: "admin", usuario: match.usuario, uid: match.uid });
+    });
+    return unsub;
+  }, [loaded, admins, sesion]);
+
+  const cerrarSesion = async () => {
+    if (sesion?.tipo === "admin") {
+      try { await signOut(auth); } catch (e) { console.error("No se pudo cerrar sesión de Firebase:", e); }
+    }
+    setSesion(null);
+  };
 
   useEffect(() => {
     if (!loaded) return;
@@ -668,12 +703,12 @@ export default function App() {
     return ok;
   };
   const guardarAdminFS = async (admin) => {
-    const ok = await fsSet("admins", admin.usuario, admin);
+    const ok = await fsSet("admins", admin.uid, admin);
     if (!ok) avisarError("No se pudo guardar los administradores. Revisa tu conexión e intenta de nuevo.");
     return ok;
   };
-  const eliminarAdminFS = async (usuario) => {
-    const ok = await fsDelete("admins", usuario);
+  const eliminarAdminFS = async (uid) => {
+    const ok = await fsDelete("admins", uid);
     if (!ok) avisarError("No se pudo guardar los administradores. Revisa tu conexión e intenta de nuevo.");
     return ok;
   };
@@ -764,7 +799,7 @@ export default function App() {
       <style>{fontImports}</style>
       <TopBar
         sesion={sesion}
-        onCambiar={() => setSesion(null)}
+        onCambiar={cerrarSesion}
         onHistorial={() => {
           setVista(vista === "historial" ? "inventario" : "historial");
           const ahora = Date.now();
@@ -838,14 +873,31 @@ function Login({ admins, onGuardarAdmin, onEntrar, error: errorGuardado }) {
     setUsuarioAdmin(""); setPassAdmin(""); setPassAdmin2(""); setError("");
   };
 
-  const iniciarSesionAdmin = () => {
+  const iniciarSesionAdmin = async () => {
     setError("");
     const u = usuarioAdmin.trim();
     if (!u || !passAdmin) { setError("Completa el usuario y la contraseña."); return; }
     const encontrado = admins.find((a) => a.usuario.toLowerCase() === u.toLowerCase());
-    if (!encontrado) { setError("Ese usuario no existe. Pídele a un administrador que te cree una cuenta."); return; }
-    if (encontrado.password !== passAdmin) { setError("Contraseña incorrecta."); return; }
-    onEntrar({ tipo: "admin", usuario: encontrado.usuario });
+    const email = emailDeUsuario(u);
+    try {
+      if (encontrado && encontrado.password && !encontrado.email) {
+        // Cuenta creada antes de activar Firebase Authentication: se migra en este
+        // mismo login, sin que la persona note nada distinto.
+        if (encontrado.password !== passAdmin) { setError("Contraseña incorrecta."); return; }
+        const credencial = await createUserWithEmailAndPassword(auth, email, passAdmin);
+        await onGuardarAdmin({ usuario: encontrado.usuario, email, uid: credencial.user.uid });
+        await marcarSetupCompletoFS();
+        onEntrar({ tipo: "admin", usuario: encontrado.usuario, uid: credencial.user.uid });
+        return;
+      }
+      const credencial = await signInWithEmailAndPassword(auth, email, passAdmin);
+      const match = admins.find((a) => a.uid === credencial.user.uid);
+      onEntrar({ tipo: "admin", usuario: match ? match.usuario : u, uid: credencial.user.uid });
+    } catch (e) {
+      if (!encontrado) { setError("Ese usuario no existe. Pídele a un administrador que te cree una cuenta."); return; }
+      if (e?.code === "auth/wrong-password" || e?.code === "auth/invalid-credential") { setError("Contraseña incorrecta."); return; }
+      setError("No se pudo iniciar sesión: " + (e?.message || "intenta de nuevo."));
+    }
   };
 
   const crearPrimerAdmin = async () => {
@@ -854,9 +906,15 @@ function Login({ admins, onGuardarAdmin, onEntrar, error: errorGuardado }) {
     if (!u) { setError("Escribe un nombre de usuario."); return; }
     if (passAdmin.length < 4) { setError("La contraseña debe tener al menos 4 caracteres."); return; }
     if (passAdmin !== passAdmin2) { setError("Las contraseñas no coinciden."); return; }
-    const nuevo = { usuario: u, password: passAdmin };
-    await onGuardarAdmin(nuevo);
-    onEntrar({ tipo: "admin", usuario: u });
+    try {
+      const email = emailDeUsuario(u);
+      const credencial = await createUserWithEmailAndPassword(auth, email, passAdmin);
+      await onGuardarAdmin({ usuario: u, email, uid: credencial.user.uid });
+      await marcarSetupCompletoFS();
+      onEntrar({ tipo: "admin", usuario: u, uid: credencial.user.uid });
+    } catch (e) {
+      setError("No se pudo crear la cuenta: " + (e?.message || "intenta de nuevo."));
+    }
   };
 
   if (vista === "adminAuth") {
@@ -1637,17 +1695,24 @@ function AdminPanel({ admins, onGuardarAdmin, onEliminarAdmin, comisionistas, on
   const [nuevoComisionista, setNuevoComisionista] = useState("");
   const [errorComisionista, setErrorComisionista] = useState("");
 
-  const yo = admins.find((a) => a.usuario === sesion.usuario);
+  const yo = admins.find((a) => a.uid === sesion.uid);
 
   const cambiar = async () => {
     setError("");
-    if (!yo || actual !== yo.password) { setError("La contraseña actual no coincide."); return; }
+    if (!yo) { setError("No se encontró tu cuenta."); return; }
     if (nueva.length < 4) { setError("La nueva contraseña debe tener al menos 4 caracteres."); return; }
     if (nueva !== nueva2) { setError("Las contraseñas nuevas no coinciden."); return; }
-    await onGuardarAdmin({ ...yo, password: nueva });
-    setGuardado(true);
-    setActual(""); setNueva(""); setNueva2("");
-    setTimeout(() => setGuardado(false), 2000);
+    try {
+      const credencial = EmailAuthProvider.credential(yo.email, actual);
+      await reauthenticateWithCredential(auth.currentUser, credencial);
+      await updatePassword(auth.currentUser, nueva);
+      setGuardado(true);
+      setActual(""); setNueva(""); setNueva2("");
+      setTimeout(() => setGuardado(false), 2000);
+    } catch (e) {
+      if (e?.code === "auth/wrong-password" || e?.code === "auth/invalid-credential") { setError("La contraseña actual no coincide."); return; }
+      setError("No se pudo cambiar la contraseña: " + (e?.message || "intenta de nuevo."));
+    }
   };
 
   const agregarAdmin = async () => {
@@ -1657,16 +1722,31 @@ function AdminPanel({ admins, onGuardarAdmin, onEliminarAdmin, comisionistas, on
     if (admins.some((a) => a.usuario.toLowerCase() === u.toLowerCase())) { setErrorNuevo("Ese usuario ya existe."); return; }
     if (nuevoPass.length < 4) { setErrorNuevo("La contraseña debe tener al menos 4 caracteres."); return; }
     if (nuevoPass !== nuevoPass2) { setErrorNuevo("Las contraseñas no coinciden."); return; }
-    await onGuardarAdmin({ usuario: u, password: nuevoPass });
-    setNuevoUsuario(""); setNuevoPass(""); setNuevoPass2("");
-    setCreado(true);
-    setTimeout(() => setCreado(false), 2000);
+    // Se crea la cuenta nueva en una instancia de Firebase separada, "de repuesto",
+    // para que Firebase Auth no cierre TU sesión al crear la del otro administrador.
+    let appTemporal = null;
+    try {
+      const email = emailDeUsuario(u);
+      appTemporal = initializeApp(firebaseConfig, `temporal-${Date.now()}`);
+      const authTemporal = getAuth(appTemporal);
+      const credencial = await createUserWithEmailAndPassword(authTemporal, email, nuevoPass);
+      const nuevoUid = credencial.user.uid;
+      await signOut(authTemporal);
+      await onGuardarAdmin({ usuario: u, email, uid: nuevoUid });
+      setNuevoUsuario(""); setNuevoPass(""); setNuevoPass2("");
+      setCreado(true);
+      setTimeout(() => setCreado(false), 2000);
+    } catch (e) {
+      setErrorNuevo("No se pudo crear la cuenta: " + (e?.message || "intenta de nuevo."));
+    } finally {
+      if (appTemporal) { try { await deleteApp(appTemporal); } catch {} }
+    }
   };
 
-  const eliminarAdmin = async (usuario) => {
-    if (usuario === sesion.usuario) return;
+  const eliminarAdmin = async (uid) => {
+    if (uid === sesion.uid) return;
     if (admins.length <= 1) return;
-    await onEliminarAdmin(usuario);
+    await onEliminarAdmin(uid);
   };
 
   const agregarComisionista = async () => {
@@ -1694,14 +1774,16 @@ function AdminPanel({ admins, onGuardarAdmin, onEliminarAdmin, comisionistas, on
         <div style={styles.smallLabel}>ACTUALES</div>
         <div style={styles.adminsList}>
           {admins.map((a) => (
-            <div key={a.usuario} style={styles.adminRow}>
-              <span style={styles.adminRowName}><KeyRound size={13} /> {a.usuario}{a.usuario === sesion.usuario ? " (tú)" : ""}</span>
-              {a.usuario !== sesion.usuario && admins.length > 1 && (
-                <button style={styles.adminRemoveBtn} onClick={() => eliminarAdmin(a.usuario)}><Trash2 size={13} /></button>
+            <div key={a.uid} style={styles.adminRow}>
+              <span style={styles.adminRowName}><KeyRound size={13} /> {a.usuario}{a.uid === sesion.uid ? " (tú)" : ""}</span>
+              {a.uid !== sesion.uid && admins.length > 1 && (
+                <button style={styles.adminRemoveBtn} onClick={() => eliminarAdmin(a.uid)}><Trash2 size={13} /></button>
               )}
             </div>
           ))}
         </div>
+
+        <div style={styles.whatsappNota}>Al eliminar un administrador se le quita el acceso a la app de inmediato. Su cuenta de acceso queda inactiva pero no se borra por completo del sistema; eso solo se puede hacer desde la consola de Firebase.</div>
 
         <div style={styles.smallLabel}>AGREGAR NUEVO ADMINISTRADOR</div>
         <input style={styles.input} placeholder="Usuario" value={nuevoUsuario} onChange={(e) => { setNuevoUsuario(e.target.value); setErrorNuevo(""); }} />
