@@ -467,6 +467,12 @@ export default function App() {
       setAdmins(arr);
       recibidos.admins = true;
       checkLoaded();
+      // Autolimpieza: si alguien ya se migró a Firebase Auth (tiene "email") pero
+      // quedó también su cuenta vieja (con "password") sin borrar, se elimina la vieja.
+      arr.filter((a) => a.email).forEach((migrado) => {
+        const viejo = arr.find((a) => a.usuario.toLowerCase() === migrado.usuario.toLowerCase() && a.password && !a.email);
+        if (viejo) fsDelete("admins", viejo.usuario);
+      });
     });
     const unsubComisionistas = suscribirColeccion("comisionistas", (arr) => {
       setComisionistas(arr.sort((a, b) => a.nombre.localeCompare(b.nombre)));
@@ -775,6 +781,7 @@ export default function App() {
       <Login
         admins={admins}
         onGuardarAdmin={guardarAdminFS}
+        onEliminarAdmin={eliminarAdminFS}
         onEntrar={setSesion}
         error={errorGuardado}
       />
@@ -860,7 +867,7 @@ export default function App() {
   );
 }
 
-function Login({ admins, onGuardarAdmin, onEntrar, error: errorGuardado }) {
+function Login({ admins, onGuardarAdmin, onEliminarAdmin, onEntrar, error: errorGuardado }) {
   const [vista, setVista] = useState("landing"); // 'landing' | 'adminAuth'
   const [usuarioAdmin, setUsuarioAdmin] = useState("");
   const [passAdmin, setPassAdmin] = useState("");
@@ -881,7 +888,10 @@ function Login({ admins, onGuardarAdmin, onEntrar, error: errorGuardado }) {
     setError("");
     const u = usuarioAdmin.trim();
     if (!u || !passAdmin) { setError("Completa el usuario y la contraseña."); return; }
-    const encontrado = admins.find((a) => a.usuario.toLowerCase() === u.toLowerCase());
+    // Si por algún motivo quedaron dos documentos para el mismo usuario (uno migrado
+    // a Firebase Auth y uno viejo sin borrar), siempre se prioriza el ya migrado.
+    const candidatos = admins.filter((a) => a.usuario.toLowerCase() === u.toLowerCase());
+    const encontrado = candidatos.find((a) => a.email) || candidatos.find((a) => a.password);
     const email = emailDeUsuario(u);
     try {
       if (encontrado && encontrado.password && !encontrado.email) {
@@ -896,6 +906,7 @@ function Login({ admins, onGuardarAdmin, onEntrar, error: errorGuardado }) {
         }
         const credencial = await createUserWithEmailAndPassword(auth, email, passAdmin);
         await onGuardarAdmin({ usuario: encontrado.usuario, email, uid: credencial.user.uid });
+        await onEliminarAdmin(encontrado.usuario); // borra el documento viejo (quedaba duplicado si no)
         await marcarSetupCompletoFS();
         onEntrar({ tipo: "admin", usuario: encontrado.usuario, uid: credencial.user.uid });
         return;
@@ -918,6 +929,7 @@ function Login({ admins, onGuardarAdmin, onEntrar, error: errorGuardado }) {
       const email = emailDeUsuario(migrando.usuario);
       const credencial = await createUserWithEmailAndPassword(auth, email, passNueva);
       await onGuardarAdmin({ usuario: migrando.usuario, email, uid: credencial.user.uid });
+      await onEliminarAdmin(migrando.usuario); // borra el documento viejo (quedaba duplicado si no)
       await marcarSetupCompletoFS();
       onEntrar({ tipo: "admin", usuario: migrando.usuario, uid: credencial.user.uid });
     } catch (e) {
