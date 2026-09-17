@@ -301,6 +301,18 @@ async function marcarSetupCompletoFS() {
     console.error("No se pudo marcar el setup como completo:", e);
   }
 }
+// Registra quién es el propietario actual. Mientras este documento no exista, las
+// reglas de Firestore permiten que una cuenta de Firebase Auth válida recupere el
+// rol de propietario sola (por ejemplo, si su documento de administrador se borró
+// por accidente). En cuanto alguien lo recupera, este documento se crea y esa
+// puerta de recuperación se cierra hasta que un administrador haga falta de nuevo.
+async function marcarPropietarioFS(uid) {
+  try {
+    await setDoc(doc(db, "config", "propietario"), { uid });
+  } catch (e) {
+    console.error("No se pudo registrar el propietario:", e);
+  }
+}
 // Pide permiso de notificaciones al navegador. Estas son "notificaciones locales":
 // avisan mientras la app está abierta (aunque esté minimizada o en otra pestaña),
 // pero no llegan si el navegador está completamente cerrado — para eso se necesitaría
@@ -524,7 +536,7 @@ export default function App() {
     const unsub = onAuthStateChanged(auth, (usuarioFirebase) => {
       if (!usuarioFirebase) return;
       const match = admins.find((a) => a.uid === usuarioFirebase.uid);
-      if (match) setSesion({ tipo: "admin", usuario: match.usuario, uid: match.uid });
+      if (match) setSesion({ tipo: "admin", usuario: match.usuario, uid: match.uid, rol: match.rol || "admin" });
     });
     return unsub;
   }, [loaded, admins, sesion]);
@@ -893,6 +905,7 @@ function Login({ admins, onGuardarAdmin, onEliminarAdmin, onEntrar, error: error
     const candidatos = admins.filter((a) => a.usuario.toLowerCase() === u.toLowerCase());
     const encontrado = candidatos.find((a) => a.email) || candidatos.find((a) => a.password);
     const email = emailDeUsuario(u);
+    const hayPropietario = admins.some((a) => a.rol === "propietario");
     try {
       if (encontrado && encontrado.password && !encontrado.email) {
         // Cuenta creada antes de activar Firebase Authentication: se migra en este
@@ -905,15 +918,26 @@ function Login({ admins, onGuardarAdmin, onEliminarAdmin, onEntrar, error: error
           return;
         }
         const credencial = await createUserWithEmailAndPassword(auth, email, passAdmin);
-        await onGuardarAdmin({ usuario: encontrado.usuario, email, uid: credencial.user.uid });
+        const rol = hayPropietario ? "admin" : "propietario";
+        await onGuardarAdmin({ usuario: encontrado.usuario, email, uid: credencial.user.uid, rol });
         await onEliminarAdmin(encontrado.usuario); // borra el documento viejo (quedaba duplicado si no)
         await marcarSetupCompletoFS();
-        onEntrar({ tipo: "admin", usuario: encontrado.usuario, uid: credencial.user.uid });
+        if (rol === "propietario") await marcarPropietarioFS(credencial.user.uid);
+        onEntrar({ tipo: "admin", usuario: encontrado.usuario, uid: credencial.user.uid, rol });
         return;
       }
       const credencial = await signInWithEmailAndPassword(auth, email, passAdmin);
-      const match = admins.find((a) => a.uid === credencial.user.uid);
-      onEntrar({ tipo: "admin", usuario: match ? match.usuario : u, uid: credencial.user.uid });
+      let match = admins.find((a) => a.uid === credencial.user.uid);
+      if (!match) {
+        // La cuenta de Firebase existe y la contraseña es correcta, pero no tiene
+        // documento de administrador en Firestore (por ejemplo, alguien lo borró por
+        // error). Se reconstruye solo: si nadie tiene hoy el rol de propietario, esta
+        // cuenta lo recupera; si ya hay uno, entra como administrador normal.
+        match = { usuario: u, email, uid: credencial.user.uid, rol: hayPropietario ? "admin" : "propietario" };
+        await onGuardarAdmin(match);
+        if (match.rol === "propietario") await marcarPropietarioFS(match.uid);
+      }
+      onEntrar({ tipo: "admin", usuario: match.usuario, uid: match.uid, rol: match.rol || "admin" });
     } catch (e) {
       if (!encontrado) { setError("Ese usuario no existe. Pídele a un administrador que te cree una cuenta."); return; }
       if (e?.code === "auth/wrong-password" || e?.code === "auth/invalid-credential") { setError("Contraseña incorrecta."); return; }
@@ -927,11 +951,14 @@ function Login({ admins, onGuardarAdmin, onEliminarAdmin, onEntrar, error: error
     if (passNueva !== passNueva2) { setError("Las contraseñas no coinciden."); return; }
     try {
       const email = emailDeUsuario(migrando.usuario);
+      const hayPropietario = admins.some((a) => a.rol === "propietario");
+      const rol = hayPropietario ? "admin" : "propietario";
       const credencial = await createUserWithEmailAndPassword(auth, email, passNueva);
-      await onGuardarAdmin({ usuario: migrando.usuario, email, uid: credencial.user.uid });
+      await onGuardarAdmin({ usuario: migrando.usuario, email, uid: credencial.user.uid, rol });
       await onEliminarAdmin(migrando.usuario); // borra el documento viejo (quedaba duplicado si no)
       await marcarSetupCompletoFS();
-      onEntrar({ tipo: "admin", usuario: migrando.usuario, uid: credencial.user.uid });
+      if (rol === "propietario") await marcarPropietarioFS(credencial.user.uid);
+      onEntrar({ tipo: "admin", usuario: migrando.usuario, uid: credencial.user.uid, rol });
     } catch (e) {
       setError("No se pudo actualizar la cuenta: " + (e?.message || "intenta de nuevo."));
     }
@@ -946,9 +973,10 @@ function Login({ admins, onGuardarAdmin, onEliminarAdmin, onEntrar, error: error
     try {
       const email = emailDeUsuario(u);
       const credencial = await createUserWithEmailAndPassword(auth, email, passAdmin);
-      await onGuardarAdmin({ usuario: u, email, uid: credencial.user.uid });
+      await onGuardarAdmin({ usuario: u, email, uid: credencial.user.uid, rol: "propietario" });
       await marcarSetupCompletoFS();
-      onEntrar({ tipo: "admin", usuario: u, uid: credencial.user.uid });
+      await marcarPropietarioFS(credencial.user.uid);
+      onEntrar({ tipo: "admin", usuario: u, uid: credencial.user.uid, rol: "propietario" });
     } catch (e) {
       setError("No se pudo crear la cuenta: " + (e?.message || "intenta de nuevo."));
     }
@@ -1756,6 +1784,8 @@ function AdminPanel({ admins, onGuardarAdmin, onEliminarAdmin, comisionistas, on
   const [errorComisionista, setErrorComisionista] = useState("");
 
   const yo = admins.find((a) => a.uid === sesion.uid);
+  const miRol = yo?.rol || "admin";
+  const puedoGestionarAdmins = miRol === "propietario" || miRol === "gestor";
 
   const cambiar = async () => {
     setError("");
@@ -1776,6 +1806,7 @@ function AdminPanel({ admins, onGuardarAdmin, onEliminarAdmin, comisionistas, on
   };
 
   const agregarAdmin = async () => {
+    if (!puedoGestionarAdmins) return;
     setErrorNuevo("");
     const u = nuevoUsuario.trim();
     if (!u) { setErrorNuevo("Escribe un nombre de usuario."); return; }
@@ -1792,7 +1823,9 @@ function AdminPanel({ admins, onGuardarAdmin, onEliminarAdmin, comisionistas, on
       const credencial = await createUserWithEmailAndPassword(authTemporal, email, nuevoPass);
       const nuevoUid = credencial.user.uid;
       await signOut(authTemporal);
-      await onGuardarAdmin({ usuario: u, email, uid: nuevoUid });
+      // Todo administrador nuevo entra como "admin" normal, sin permiso de gestionar
+      // a otros. Solo el propietario puede subirlo a "gestor" después, desde esta pantalla.
+      await onGuardarAdmin({ usuario: u, email, uid: nuevoUid, rol: "admin" });
       setNuevoUsuario(""); setNuevoPass(""); setNuevoPass2("");
       setCreado(true);
       setTimeout(() => setCreado(false), 2000);
@@ -1803,10 +1836,20 @@ function AdminPanel({ admins, onGuardarAdmin, onEliminarAdmin, comisionistas, on
     }
   };
 
-  const eliminarAdmin = async (uid) => {
-    if (uid === sesion.uid) return;
+  const eliminarAdmin = async (admin) => {
+    if (admin.uid === sesion.uid) return;
     if (admins.length <= 1) return;
-    await onEliminarAdmin(uid);
+    const rolObjetivo = admin.rol || "admin";
+    // El propietario puede quitar a cualquiera. Un gestor solo puede quitar
+    // administradores normales, nunca a otro gestor ni al propietario.
+    if (miRol === "gestor" && rolObjetivo !== "admin") return;
+    if (miRol === "admin") return;
+    await onEliminarAdmin(admin.uid);
+  };
+
+  const cambiarRolAdmin = async (admin, nuevoRol) => {
+    if (miRol !== "propietario" || admin.uid === sesion.uid || admin.rol === "propietario") return;
+    await onGuardarAdmin({ ...admin, rol: nuevoRol });
   };
 
   const agregarComisionista = async () => {
@@ -1833,24 +1876,52 @@ function AdminPanel({ admins, onGuardarAdmin, onEliminarAdmin, comisionistas, on
 
         <div style={styles.smallLabel}>ACTUALES</div>
         <div style={styles.adminsList}>
-          {admins.map((a) => (
-            <div key={a.uid} style={styles.adminRow}>
-              <span style={styles.adminRowName}><KeyRound size={13} /> {a.usuario}{a.uid === sesion.uid ? " (tú)" : ""}</span>
-              {a.uid !== sesion.uid && admins.length > 1 && (
-                <button style={styles.adminRemoveBtn} onClick={() => eliminarAdmin(a.uid)}><Trash2 size={13} /></button>
-              )}
-            </div>
-          ))}
+          {admins.map((a) => {
+            const rolA = a.rol || "admin";
+            const puedoEliminarlo = a.uid !== sesion.uid && admins.length > 1 && miRol === "propietario"
+              ? true
+              : a.uid !== sesion.uid && admins.length > 1 && miRol === "gestor" && rolA === "admin";
+            const puedoCambiarleRol = miRol === "propietario" && a.uid !== sesion.uid && rolA !== "propietario";
+            return (
+              <div key={a.uid} style={styles.adminRow}>
+                <span style={styles.adminRowName}>
+                  <KeyRound size={13} /> {a.usuario}{a.uid === sesion.uid ? " (tú)" : ""}
+                  {rolA === "propietario" && <span style={styles.rolTagPropietario}>Propietario</span>}
+                  {rolA === "gestor" && <span style={styles.rolTagGestor}>Gestor</span>}
+                </span>
+                <div style={styles.row8}>
+                  {puedoCambiarleRol && (
+                    <button
+                      style={styles.adminRoleBtn}
+                      title={rolA === "gestor" ? "Quitarle el permiso de gestionar administradores" : "Darle permiso de gestionar administradores"}
+                      onClick={() => cambiarRolAdmin(a, rolA === "gestor" ? "admin" : "gestor")}
+                    >
+                      {rolA === "gestor" ? "Quitar gestor" : "Hacer gestor"}
+                    </button>
+                  )}
+                  {puedoEliminarlo && (
+                    <button style={styles.adminRemoveBtn} onClick={() => eliminarAdmin(a)}><Trash2 size={13} /></button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
         </div>
 
         <div style={styles.whatsappNota}>Al eliminar un administrador se le quita el acceso a la app de inmediato. Su cuenta de acceso queda inactiva pero no se borra por completo del sistema; eso solo se puede hacer desde la consola de Firebase.</div>
 
-        <div style={styles.smallLabel}>AGREGAR NUEVO ADMINISTRADOR</div>
-        <input style={styles.input} placeholder="Usuario" value={nuevoUsuario} onChange={(e) => { setNuevoUsuario(e.target.value); setErrorNuevo(""); }} />
-        <input style={{ ...styles.input, marginTop: 8 }} type="password" placeholder="Contraseña" value={nuevoPass} onChange={(e) => { setNuevoPass(e.target.value); setErrorNuevo(""); }} />
-        <input style={{ ...styles.input, marginTop: 8 }} type="password" placeholder="Repite la contraseña" value={nuevoPass2} onChange={(e) => { setNuevoPass2(e.target.value); setErrorNuevo(""); }} />
-        {errorNuevo && <div style={styles.errorText}>{errorNuevo}</div>}
-        <button style={styles.saveBtnSecondary} onClick={agregarAdmin}>{creado ? <><Check size={16} /> Administrador agregado</> : <><Plus size={16} /> Agregar administrador</>}</button>
+        {puedoGestionarAdmins ? (
+          <>
+            <div style={styles.smallLabel}>AGREGAR NUEVO ADMINISTRADOR</div>
+            <input style={styles.input} placeholder="Usuario" value={nuevoUsuario} onChange={(e) => { setNuevoUsuario(e.target.value); setErrorNuevo(""); }} />
+            <input style={{ ...styles.input, marginTop: 8 }} type="password" placeholder="Contraseña" value={nuevoPass} onChange={(e) => { setNuevoPass(e.target.value); setErrorNuevo(""); }} />
+            <input style={{ ...styles.input, marginTop: 8 }} type="password" placeholder="Repite la contraseña" value={nuevoPass2} onChange={(e) => { setNuevoPass2(e.target.value); setErrorNuevo(""); }} />
+            {errorNuevo && <div style={styles.errorText}>{errorNuevo}</div>}
+            <button style={styles.saveBtnSecondary} onClick={agregarAdmin}>{creado ? <><Check size={16} /> Administrador agregado</> : <><Plus size={16} /> Agregar administrador</>}</button>
+          </>
+        ) : (
+          <div style={styles.whatsappNota}>Solo el propietario o un administrador con permiso de "gestor" puede agregar o quitar administradores.</div>
+        )}
 
         <div style={styles.divider} />
 
@@ -3041,6 +3112,9 @@ const styles = {
   adminRow: { display: "flex", alignItems: "center", justifyContent: "space-between", background: "#1E1A17", border: "1px solid #302A24", borderRadius: 11, padding: "10px 12px" },
   adminRowName: { display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 600, color: "#F4F0E9" },
   adminRemoveBtn: { background: "none", border: "none", color: "#E2503B", cursor: "pointer", padding: 4, display: "flex", alignItems: "center" },
+  rolTagPropietario: { fontSize: 9.5, fontWeight: 700, letterSpacing: 0.5, color: "#E1521B", background: "rgba(225,82,27,0.14)", border: "1px solid rgba(225,82,27,0.35)", borderRadius: 6, padding: "2px 6px" },
+  rolTagGestor: { fontSize: 9.5, fontWeight: 700, letterSpacing: 0.5, color: "#D9A24B", background: "rgba(217,161,92,0.14)", border: "1px solid rgba(217,161,92,0.35)", borderRadius: 6, padding: "2px 6px" },
+  adminRoleBtn: { background: "#262019", border: "1px solid #332C25", color: "#B0A89B", borderRadius: 8, padding: "5px 9px", fontSize: 11, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap" },
   divider: { height: 1, background: "#302A24", margin: "26px 0 6px" },
   sectionDivider: { height: 1, background: "#302A24", margin: "30px 0 4px" },
   canalesNota: { fontSize: 11.5, color: "#7A7268", lineHeight: 1.4, marginTop: 8, textAlign: "left" },
