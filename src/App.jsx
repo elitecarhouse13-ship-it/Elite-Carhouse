@@ -434,7 +434,7 @@ export default function App() {
     const t = setTimeout(() => setCargaLenta(true), 8000);
     return () => clearTimeout(t);
   }, [loaded]);
-  const [vista, setVista] = useState("inventario"); // 'inventario' | 'historial' | 'solicitudes'
+  const [vista, setVista] = useState("inventario"); // 'inventario' | 'historial' | 'solicitudes' | 'config'
   const [, forceTick] = useState(0);
   const [notificaciones, setNotificaciones] = useState([]);
   const [reservasIgnoradas, setReservasIgnoradas] = useState([]);
@@ -813,12 +813,38 @@ export default function App() {
   const historialSinVer = productos.filter((p) => p.estado === "vendido" && p.fechaVendido > ultimaVistaHistorial).length;
   const solicitudesSinVer = solicitudes.filter((s) => s.estado === "conseguido" && s.fechaConseguido > ultimaVistaSolicitudes).length;
 
+  const exportarInventarioFS = () => {
+    const filas = productos.map((p) => ({
+      Nombre: p.nombre,
+      Categoría: CATEGORIAS.find((c) => c.id === p.categoria)?.label || p.categoria,
+      Estado: ESTADO_META[p.estado]?.label || p.estado,
+      "Precio base": p.precioBase ?? "",
+      "Precio mínimo": p.precioMinimo ?? "",
+      "Precio de venta": p.precioVenta ?? "",
+      Detalles: p.detalles || "",
+      "Reservado para": p.reservadoPara || "",
+      "Reservado hasta": p.reservadoHasta || "",
+      "Publicado en": (p.canales || []).map((cid) => CANALES_SUGERIDOS.find((c) => c.id === cid)?.label || cid).join(", "),
+      "Publicado el": p.fechaPublicado ? new Date(p.fechaPublicado).toLocaleDateString("es-CO") : "",
+      "Vendido el": p.fechaVendido ? new Date(p.fechaVendido).toLocaleDateString("es-CO") : "",
+      "Vendido por": p.comisionistaNombre || "",
+      "Confirmado por (admin)": p.vendidoPor || "",
+      "Notas internas": p.notas || "",
+    }));
+    const hoja = XLSX.utils.json_to_sheet(filas);
+    const libro = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(libro, hoja, "Inventario");
+    XLSX.writeFile(libro, `inventario-elite-carhouse-${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
   return (
     <div style={styles.app}>
       <style>{fontImports}</style>
       <TopBar
         sesion={sesion}
         onCambiar={cerrarSesion}
+        onAjustes={() => setVista("config")}
+        onExportar={exportarInventarioFS}
         onHistorial={() => {
           setVista(vista === "historial" ? "inventario" : "historial");
           const ahora = Date.now();
@@ -872,8 +898,10 @@ export default function App() {
         <Historial productos={productos} esAdmin={esAdmin} sesion={sesion} comisionistas={comisionistas} onCambiarEstado={cambiarEstado} onEliminar={eliminar} onVolver={() => setVista("inventario")} />
       ) : vista === "solicitudes" ? (
         <Solicitudes solicitudes={solicitudes} onGuardarSolicitud={guardarSolicitudFS} onEliminarSolicitud={eliminarSolicitudFS} onGuardarPapeleraEntry={guardarPapeleraEntryFS} productos={productos} esAdmin={esAdmin} sesion={sesion} onVolver={() => setVista("inventario")} />
+      ) : vista === "config" && esAdmin ? (
+        <AdminPanel admins={admins} onGuardarAdmin={guardarAdminFS} onEliminarAdmin={eliminarAdminFS} comisionistas={comisionistas} onGuardarComisionista={guardarComisionistaFS} onEliminarComisionista={eliminarComisionistaFS} sesion={sesion} onClose={() => setVista("inventario")} papelera={papelera} onRestaurar={restaurarDePapelera} onEliminarDefinitivo={eliminarDefinitivo} />
       ) : (
-        <Inventario productos={productos} solicitudes={solicitudes} onGuardarProducto={guardarProductoFS} esAdmin={esAdmin} sesion={sesion} admins={admins} onGuardarAdmin={guardarAdminFS} onEliminarAdmin={eliminarAdminFS} comisionistas={comisionistas} onGuardarComisionista={guardarComisionistaFS} onEliminarComisionista={eliminarComisionistaFS} onCambiarEstado={cambiarEstado} onEliminar={eliminar} papelera={papelera} onRestaurar={restaurarDePapelera} onEliminarDefinitivo={eliminarDefinitivo} />
+        <Inventario productos={productos} solicitudes={solicitudes} onGuardarProducto={guardarProductoFS} esAdmin={esAdmin} sesion={sesion} comisionistas={comisionistas} onCambiarEstado={cambiarEstado} onEliminar={eliminar} />
       )}
     </div>
   );
@@ -1060,7 +1088,9 @@ function Login({ admins, onGuardarAdmin, onEliminarAdmin, onEntrar, error: error
   );
 }
 
-function TopBar({ sesion, onCambiar, onHistorial, onSolicitudes, vistaActiva, historialBadge, solicitudesBadge, notifPushEstado, onActivarPush }) {
+function TopBar({ sesion, onCambiar, onAjustes, onExportar, onHistorial, onSolicitudes, vistaActiva, historialBadge, solicitudesBadge, notifPushEstado, onActivarPush }) {
+  const [menuAbierto, setMenuAbierto] = useState(false);
+  const esAdmin = sesion.tipo === "admin";
   return (
     <div style={styles.topBar}>
       <div className="app-shell" style={styles.topBarInner}>
@@ -1086,9 +1116,31 @@ function TopBar({ sesion, onCambiar, onHistorial, onSolicitudes, vistaActiva, hi
             <Award size={15} />
             {historialBadge > 0 && <span style={styles.navBadge}>{historialBadge > 9 ? "9+" : historialBadge}</span>}
           </button>
-          <button style={styles.userChip} onClick={onCambiar}>
-            <User size={13} /> {sesion.tipo === "admin" ? sesion.usuario : "Equipo comercial"}
-          </button>
+          <div style={styles.userMenuWrap}>
+            <button style={{ ...styles.userChip, ...(vistaActiva === "config" ? styles.historialBtnActive : {}) }} onClick={() => setMenuAbierto((o) => !o)}>
+              <User size={13} /> {esAdmin ? sesion.usuario : "Equipo comercial"}
+            </button>
+            {menuAbierto && (
+              <>
+                <div style={styles.catDropdownOverlay} onClick={() => setMenuAbierto(false)} />
+                <div style={styles.userMenuPanel}>
+                  {esAdmin && (
+                    <button style={styles.userMenuOpcion} onClick={() => { setMenuAbierto(false); onAjustes(); }}>
+                      <Settings size={15} /> Ajustes
+                    </button>
+                  )}
+                  {esAdmin && (
+                    <button style={styles.userMenuOpcion} onClick={() => { setMenuAbierto(false); onExportar(); }}>
+                      <Download size={15} /> Exportar a Excel
+                    </button>
+                  )}
+                  <button style={{ ...styles.userMenuOpcion, ...styles.userMenuOpcionSalir }} onClick={() => { setMenuAbierto(false); onCambiar(); }}>
+                    <X size={15} /> Cerrar sesión
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
         </div>
       </div>
     </div>
@@ -1097,7 +1149,7 @@ function TopBar({ sesion, onCambiar, onHistorial, onSolicitudes, vistaActiva, hi
 
 /* ---------------- Inventario ---------------- */
 
-function Inventario({ productos, solicitudes, onGuardarProducto, esAdmin, sesion, admins, onGuardarAdmin, onEliminarAdmin, comisionistas, onGuardarComisionista, onEliminarComisionista, onCambiarEstado, onEliminar, papelera, onRestaurar, onEliminarDefinitivo }) {
+function Inventario({ productos, solicitudes, onGuardarProducto, esAdmin, sesion, comisionistas, onCambiarEstado, onEliminar }) {
   const [filtro, setFiltro] = useState("disponible");
   const [filtroCategoria, setFiltroCategoria] = useState("todas");
   const [categoriaAbierta, setCategoriaAbierta] = useState(false);
@@ -1112,7 +1164,6 @@ function Inventario({ productos, solicitudes, onGuardarProducto, esAdmin, sesion
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState(null);
   const [detalle, setDetalle] = useState(null);
-  const [showConfig, setShowConfig] = useState(false);
 
   const filtrosActivos = precioMin !== "" || precioMax !== "" || anioMin !== "" || anioMax !== "" || kmMax !== "" || ordenPor !== "reciente";
   const limpiarFiltros = () => {
@@ -1194,33 +1245,6 @@ function Inventario({ productos, solicitudes, onGuardarProducto, esAdmin, sesion
     setDetalle(null);
   };
 
-  const exportarInventario = () => {
-    const filas = productos.map((p) => ({
-      Nombre: p.nombre,
-      Categoría: CATEGORIAS.find((c) => c.id === p.categoria)?.label || p.categoria,
-      Estado: ESTADO_META[p.estado]?.label || p.estado,
-      "Precio base": p.precioBase ?? "",
-      "Precio mínimo": p.precioMinimo ?? "",
-      "Precio de venta": p.precioVenta ?? "",
-      Detalles: p.detalles || "",
-      "Reservado para": p.reservadoPara || "",
-      "Reservado hasta": p.reservadoHasta || "",
-      "Publicado en": (p.canales || []).map((cid) => CANALES_SUGERIDOS.find((c) => c.id === cid)?.label || cid).join(", "),
-      "Publicado el": p.fechaPublicado ? new Date(p.fechaPublicado).toLocaleDateString("es-CO") : "",
-      "Vendido el": p.fechaVendido ? new Date(p.fechaVendido).toLocaleDateString("es-CO") : "",
-      "Vendido por": p.comisionistaNombre || "",
-      "Confirmado por (admin)": p.vendidoPor || "",
-      "Notas internas": p.notas || "",
-    }));
-    const hoja = XLSX.utils.json_to_sheet(filas);
-    const libro = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(libro, hoja, "Inventario");
-    XLSX.writeFile(libro, `inventario-elite-carhouse-${new Date().toISOString().slice(0, 10)}.xlsx`);
-  };
-
-  if (showConfig) {
-    return <AdminPanel admins={admins} onGuardarAdmin={onGuardarAdmin} onEliminarAdmin={onEliminarAdmin} comisionistas={comisionistas} onGuardarComisionista={onGuardarComisionista} onEliminarComisionista={onEliminarComisionista} sesion={sesion} onClose={() => setShowConfig(false)} papelera={papelera} onRestaurar={onRestaurar} onEliminarDefinitivo={onEliminarDefinitivo} />;
-  }
 
   if (showForm && esAdmin) {
     return (
@@ -1268,8 +1292,6 @@ function Inventario({ productos, solicitudes, onGuardarProducto, esAdmin, sesion
         </div>
         {esAdmin && (
           <div style={styles.headerBtnRow}>
-            <button style={styles.settingsBtn} onClick={exportarInventario} title="Exportar a Excel"><Download size={16} /></button>
-            <button style={styles.settingsBtn} onClick={() => setShowConfig(true)}><Settings size={16} /></button>
             <button style={styles.addBtn} onClick={() => setShowForm(true)}><Plus size={16} /> Nuevo</button>
           </div>
         )}
@@ -3002,6 +3024,10 @@ const styles = {
   navBadge: { position: "absolute", top: -4, right: -4, minWidth: 16, height: 16, borderRadius: 8, background: "#E14B3A", color: "#FFFFFF", fontSize: 9.5, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 3px", border: "1.5px solid #1B1817" },
   historialBtnActive: { background: "#E1521B", border: "1px solid #E1521B", color: "#FFFFFF" },
   userChip: { display: "flex", alignItems: "center", gap: 6, background: "#2F2A28", color: "#E4DED2", border: "none", borderRadius: 20, padding: "7px 13px", fontSize: 12, fontWeight: 600, cursor: "pointer" },
+  userMenuWrap: { position: "relative" },
+  userMenuPanel: { position: "absolute", top: "calc(100% + 8px)", right: 0, zIndex: 9, background: "#1E1A17", border: "1px solid #302A24", borderRadius: 12, padding: 6, minWidth: 190, boxShadow: "0 12px 28px rgba(0,0,0,0.45)", display: "flex", flexDirection: "column", gap: 2 },
+  userMenuOpcion: { display: "flex", alignItems: "center", gap: 9, background: "none", border: "none", color: "#D8D2C7", fontSize: 13.5, fontWeight: 600, padding: "10px 11px", borderRadius: 8, cursor: "pointer", textAlign: "left", whiteSpace: "nowrap", width: "100%" },
+  userMenuOpcionSalir: { color: "#E2503B", borderTop: "1px solid #302A24", marginTop: 2, paddingTop: 11, borderRadius: "0 0 8px 8px" },
 
   notifWrap: { display: "flex", flexDirection: "column", gap: 6, padding: "10px 16px 0" },
   notifBanner: { display: "flex", alignItems: "flex-start", gap: 8, background: "#3A1F1A", border: "1px solid #E14B3A", color: "#FFE8E2", borderRadius: 12, padding: "12px 13px", fontSize: 13, boxShadow: "0 8px 20px rgba(0,0,0,0.35)" },
